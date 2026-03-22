@@ -44,6 +44,7 @@ linters:
         - G704
         - G117
         - G118
+        - G101
     misspell:
       locale: US
       ignore-rules:

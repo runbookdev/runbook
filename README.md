@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/runbookdev/runbook/actions"><img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/runbookdev/runbook/ci.yml"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/runbookdev/runbook/actions"><img src="https://github.com/runbookdev/runbook/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://goreportcard.com/report/github.com/runbookdev/runbook"><img src="https://goreportcard.com/badge/github.com/runbookdev/runbook" alt="Go Report" /></a>
 </p>
 
