@@ -1,0 +1,43 @@
+BINARY    := runbook
+PKG       := github.com/runbookdev/runbook
+VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
+DATE      := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS   := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
+.PHONY: build build-all test test-pkg lint validate-templates clean
+
+build:
+	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/runbook
+
+build-all:
+	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-linux-amd64   ./cmd/runbook
+	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-linux-arm64   ./cmd/runbook
+	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-darwin-amd64  ./cmd/runbook
+	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-darwin-arm64  ./cmd/runbook
+	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY)-windows-amd64.exe ./cmd/runbook
+
+test:
+	go test -race -count=1 ./...
+
+test-pkg:
+	go test -race -count=1 -v ./internal/$(PKG)/...
+
+lint:
+	golangci-lint run ./...
+
+validate-templates: build
+	@echo "Validating .runbook templates..."
+	@FAIL=0; for f in templates/*.runbook; do \
+		if ./bin/runbook validate "$$f" > /dev/null 2>&1; then \
+			echo "  ✓ $$f"; \
+		else \
+			echo "  ✗ $$f"; \
+			./bin/runbook validate "$$f" 2>&1 | sed 's/^/    /'; \
+			FAIL=1; \
+		fi; \
+	done; \
+	if [ "$$FAIL" = "1" ]; then echo "Template validation failed"; exit 1; fi
+
+clean:
+	rm -rf bin/

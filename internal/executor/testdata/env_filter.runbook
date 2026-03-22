@@ -1,0 +1,27 @@
+---
+name: Env Filter
+version: 1.0.0
+environments: [staging, production]
+---
+
+# Environment filtering
+
+```step name="always-run"
+echo "runs everywhere"
+```
+
+```step name="staging-only"
+  env: [staging]
+---
+echo "staging only"
+```
+
+```step name="production-only"
+  env: [production]
+---
+echo "production only"
+```
+
+```step name="also-always"
+echo "also runs everywhere"
+```

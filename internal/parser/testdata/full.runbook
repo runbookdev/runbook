@@ -1,0 +1,64 @@
+---
+name: Full Deploy
+version: 2.0.0
+description: Full deployment with all block types
+owners: [platform-team, sre-team]
+environments: [staging, production]
+requires:
+  tools: [kubectl, jq]
+  permissions: [k8s:deploy]
+  approvals:
+    production: [tech-lead]
+timeout: 30m
+---
+
+# Full Deploy
+
+## Prerequisites
+
+```check name="cluster-healthy"
+kubectl get nodes | grep -c Ready | test $(cat) -ge 3
+```
+
+```check name="no-incidents"
+curl -s https://status.internal/api/active | jq '.count == 0'
+```
+
+## Deploy
+
+```step name="migrate-db" rollback="rollback-db"
+  timeout: 300s
+  confirm: production
+  env: [staging, production]
+---
+./scripts/migrate.sh --env={{env}} --version={{version}}
+```
+
+```rollback name="rollback-db"
+./scripts/migrate.sh --env={{env}} --rollback
+```
+
+```step name="deploy-app" depends_on="migrate-db" rollback="rollback-app"
+  timeout: 600s
+---
+kubectl set image deployment/api api={{image}}:{{version}}
+kubectl rollout status deployment/api --timeout=120s
+```
+
+```rollback name="rollback-app"
+kubectl rollout undo deployment/api
+```
+
+## Monitor
+
+```wait name="canary-watch" duration="300s"
+  abort_if: error_rate > 1%
+---
+./scripts/monitor-canary.sh --threshold=1%
+```
+
+## Verify
+
+```step name="smoke-test" depends_on="deploy-app"
+curl -sf http://api.{{env}}.svc.cluster.local/health
+```

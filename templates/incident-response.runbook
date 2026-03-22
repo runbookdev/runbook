@@ -1,0 +1,111 @@
+---
+name: Incident Response
+version: 1.0.0
+description: P1 incident triage, mitigation, and recovery
+owners: [oncall, sre-team]
+environments: [production]
+requires:
+  tools: [kubectl, curl, jq]
+timeout: 4h
+severity: critical
+---
+
+# P1 Incident Response
+
+Structured response for a P1 incident affecting **{{affected_service}}**
+in production. Follow each step carefully and confirm before taking
+production actions.
+
+**Incident**: {{incident_id}}
+**Started**: {{timestamp}}
+**Oncall**: {{user}}
+
+## Phase 1 — Triage
+
+```check name="gather-signals"
+echo "=== Service Status ==="
+curl -sf http://{{affected_service}}.production.svc.cluster.local/health 2>&1 || echo "Service unreachable"
+
+echo ""
+echo "=== Pod Status ==="
+kubectl get pods -l app={{affected_service}} --no-headers 2>/dev/null || echo "Cannot list pods"
+
+echo ""
+echo "=== Recent Events ==="
+kubectl get events --sort-by='.lastTimestamp' --field-selector involvedObject.name={{affected_service}} 2>/dev/null | tail -5
+```
+
+```check name="check-dependencies"
+echo "Checking upstream dependencies..."
+for SVC in {{dep_services}}; do
+  STATUS=$(curl -sf "http://${SVC}.production.svc.cluster.local/health" 2>/dev/null | jq -r '.status' 2>/dev/null || echo "unreachable")
+  echo "  $SVC: $STATUS"
+done
+```
+
+## Phase 2 — Mitigate
+
+```step name="scale-up" rollback="scale-down"
+  confirm: production
+---
+CURRENT=$(kubectl get deployment/{{affected_service}} -o jsonpath='{.spec.replicas}')
+TARGET=$((CURRENT * 2))
+echo "Scaling {{affected_service}} from $CURRENT to $TARGET replicas"
+kubectl scale deployment/{{affected_service}} --replicas=$TARGET
+kubectl rollout status deployment/{{affected_service}} --timeout=120s
+echo "Scaled to $TARGET replicas"
+```
+
+```rollback name="scale-down"
+CURRENT=$(kubectl get deployment/{{affected_service}} -o jsonpath='{.spec.replicas}')
+TARGET=$((CURRENT / 2))
+echo "Scaling back to $TARGET replicas"
+kubectl scale deployment/{{affected_service}} --replicas=$TARGET
+```
+
+```step name="enable-circuit-breaker" rollback="disable-circuit-breaker"
+  confirm: production
+---
+echo "Enabling circuit breaker for degraded upstream dependencies..."
+echo "TODO: toggle feature flag or update service mesh config"
+```
+
+```rollback name="disable-circuit-breaker"
+echo "Disabling circuit breaker..."
+echo "TODO: restore normal routing"
+```
+
+## Phase 3 — Verify Recovery
+
+```wait name="stabilization-period" duration="120s"
+---
+echo "Monitoring for 2 minutes..."
+for i in $(seq 1 12); do
+  HEALTH=$(curl -sf http://{{affected_service}}.production.svc.cluster.local/health 2>/dev/null | jq -r '.status' 2>/dev/null || echo "unreachable")
+  echo "  Check $i/12: $HEALTH"
+  sleep 10
+done
+```
+
+```step name="verify-metrics"
+  timeout: 30s
+---
+echo "Verifying error rates have returned to normal..."
+echo "TODO: query Prometheus/Datadog for error rate < threshold"
+echo "TODO: verify p99 latency is within SLO"
+echo "Metrics check complete"
+```
+
+## Phase 4 — Document
+
+```step name="update-incident-log"
+echo "=== Incident Summary ==="
+echo "Incident:  {{incident_id}}"
+echo "Service:   {{affected_service}}"
+echo "Responder: {{user}}"
+echo "Host:      {{hostname}}"
+echo "Time:      {{timestamp}}"
+echo ""
+echo "TODO: Update incident channel with resolution summary"
+echo "TODO: Schedule post-incident review within 48 hours"
+```

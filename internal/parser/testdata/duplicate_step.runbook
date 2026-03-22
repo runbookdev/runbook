@@ -1,0 +1,11 @@
+---
+name: Duplicate Steps
+---
+
+```step name="do-it"
+echo "first"
+```
+
+```step name="do-it"
+echo "second"
+```

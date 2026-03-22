@@ -1,0 +1,14 @@
+---
+name: Minimal Runbook
+version: 1.0.0
+---
+
+# Minimal Runbook
+
+```check name="pre-check"
+echo "checking"
+```
+
+```step name="do-it"
+echo "doing it"
+```

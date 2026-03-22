@@ -1,0 +1,6 @@
+---
+name: Bad Runbook
+---
+
+```step name="broken"
+echo "this block never closes"

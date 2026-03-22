@@ -1,0 +1,20 @@
+---
+name: With Timeout
+version: 1.0.0
+---
+
+# Per-step timeout
+
+```step name="fast-step"
+echo "fast"
+```
+
+```step name="slow-step"
+  timeout: 500ms
+---
+sleep 60
+```
+
+```step name="after-slow"
+echo "should not run"
+```

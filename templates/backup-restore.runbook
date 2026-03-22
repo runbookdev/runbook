@@ -1,0 +1,127 @@
+---
+name: Backup Verification and Restore Test
+version: 1.0.0
+description: Verify backup integrity by performing a test restore
+owners: [data-team, sre-team]
+environments: [staging]
+requires:
+  tools: [psql, aws]
+timeout: 2h
+---
+
+# Backup Verification and Restore Test
+
+Verify the integrity of the latest backup for **{{db_name}}** by
+restoring it to a temporary database and running validation queries.
+This should be run on a regular schedule (weekly) in staging.
+
+> **Note**: This runbook only runs in staging to avoid impacting
+> production resources.
+
+## Prerequisites
+
+```check name="staging-only"
+echo "Environment: {{env}}"
+test "{{env}}" = "staging"
+echo "Confirmed running in staging"
+```
+
+```check name="restore-target-clean"
+echo "Checking restore target database does not exist..."
+if psql -h {{restore_host}} -U {{db_user}} -lqt 2>/dev/null | grep -qw "{{db_name}}_restore_test"; then
+  echo "WARNING: {{db_name}}_restore_test already exists, dropping..."
+  psql -h {{restore_host}} -U {{db_user}} -c "DROP DATABASE {{db_name}}_restore_test;" 2>/dev/null
+fi
+echo "Restore target is clean"
+```
+
+## Step 1 — Locate Latest Backup
+
+```step name="find-backup"
+  timeout: 60s
+  env: [staging]
+---
+echo "Finding latest backup for {{db_name}}..."
+LATEST=$(aws s3 ls s3://{{backup_bucket}}/{{db_name}}/ --recursive | sort | tail -1 | awk '{print $4}')
+echo "Latest backup: $LATEST"
+test -n "$LATEST"
+echo "$LATEST" > /tmp/restore_test_backup_path
+```
+
+## Step 2 — Download Backup
+
+```step name="download-backup" rollback="cleanup-download"
+  timeout: 600s
+  env: [staging]
+---
+BACKUP_PATH=$(cat /tmp/restore_test_backup_path)
+echo "Downloading s3://{{backup_bucket}}/$BACKUP_PATH..."
+aws s3 cp "s3://{{backup_bucket}}/$BACKUP_PATH" /tmp/restore_test_backup.sql.gz
+SIZE=$(du -h /tmp/restore_test_backup.sql.gz | cut -f1)
+echo "Downloaded: $SIZE"
+```
+
+```rollback name="cleanup-download"
+rm -f /tmp/restore_test_backup.sql.gz /tmp/restore_test_backup_path
+echo "Cleaned up temporary files"
+```
+
+## Step 3 — Restore to Test Database
+
+```step name="restore-database" rollback="drop-test-db"
+  timeout: 1800s
+  env: [staging]
+---
+echo "Creating restore test database..."
+psql -h {{restore_host}} -U {{db_user}} -c "CREATE DATABASE {{db_name}}_restore_test;"
+
+echo "Restoring backup..."
+gunzip -c /tmp/restore_test_backup.sql.gz | pg_restore \
+  -h {{restore_host}} -U {{db_user}} -d {{db_name}}_restore_test \
+  --no-owner --no-acl 2>&1 | tail -5
+
+echo "Restore complete"
+```
+
+```rollback name="drop-test-db"
+echo "Dropping test database..."
+psql -h {{restore_host}} -U {{db_user}} -c "DROP DATABASE IF EXISTS {{db_name}}_restore_test;"
+echo "Test database dropped"
+```
+
+## Step 4 — Validate Restored Data
+
+```step name="validate-data"
+  timeout: 120s
+  env: [staging]
+---
+echo "Validating restored data..."
+
+TABLE_COUNT=$(psql -h {{restore_host}} -U {{db_user}} -d {{db_name}}_restore_test -tAc \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';")
+echo "Tables: $TABLE_COUNT"
+test "$TABLE_COUNT" -gt 0
+
+ROW_COUNT=$(psql -h {{restore_host}} -U {{db_user}} -d {{db_name}}_restore_test -tAc \
+  "SELECT count(*) FROM {{primary_table}};")
+echo "Rows in {{primary_table}}: $ROW_COUNT"
+test "$ROW_COUNT" -gt 0
+
+echo "Data validation passed"
+```
+
+## Step 5 — Cleanup
+
+```step name="cleanup"
+  env: [staging]
+---
+echo "Cleaning up..."
+psql -h {{restore_host}} -U {{db_user}} -c "DROP DATABASE IF EXISTS {{db_name}}_restore_test;"
+rm -f /tmp/restore_test_backup.sql.gz /tmp/restore_test_backup_path
+echo "Cleanup complete"
+echo ""
+echo "=== Backup Verification Result ==="
+echo "Database:  {{db_name}}"
+echo "Verified:  {{timestamp}}"
+echo "Status:    PASS"
+```

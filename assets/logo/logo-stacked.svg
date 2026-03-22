@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <defs>
+    <linearGradient id="s-page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3498DB"/>
+      <stop offset="100%" stop-color="#2176AE"/>
+    </linearGradient>
+    <linearGradient id="s-text" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1B4D72"/>
+      <stop offset="100%" stop-color="#143B59"/>
+    </linearGradient>
+    <linearGradient id="s-play" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#D6EAF8"/>
+    </linearGradient>
+    <filter id="s-shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000" flood-opacity=".2"/>
+    </filter>
+    <filter id="s-glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Book icon -->
+  <g transform="translate(100, 14)" filter="url(#s-shadow)">
+    <!-- Left page -->
+    <path d="M100 8 Q100 0 92 0 L8 0 Q0 0 0 8 L0 144 Q0 152 8 152 L92 152 Q100 152 100 144 Z" fill="#1B3F5C" opacity=".85"/>
+
+    <!-- Doc lines -->
+    <g stroke-linecap="round" opacity=".45">
+      <line x1="16" y1="24" x2="36" y2="24" stroke="#3D7EAA" stroke-width="3"/>
+      <line x1="16" y1="38" x2="80" y2="38" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="50" x2="68" y2="50" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="62" x2="76" y2="62" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="76" x2="56" y2="76" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="92" x2="32" y2="92" stroke="#3D7EAA" stroke-width="3"/>
+      <line x1="16" y1="106" x2="72" y2="106" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="118" x2="64" y2="118" stroke="#2D6A8F" stroke-width="2"/>
+      <line x1="16" y1="130" x2="70" y2="130" stroke="#2D6A8F" stroke-width="2"/>
+    </g>
+
+    <!-- Spine -->
+    <rect x="96" y="4" width="8" height="144" rx="2" fill="#0E2233"/>
+
+    <!-- Right page -->
+    <path d="M100 8 Q100 0 108 0 L192 0 Q200 0 200 8 L200 144 Q200 152 192 152 L108 152 Q100 152 100 144 Z" fill="url(#s-page)"/>
+
+    <!-- Play button -->
+    <path d="M130 52 L170 76 L130 100 Z" fill="url(#s-play)" filter="url(#s-glow)" opacity=".95"/>
+
+    <!-- Page curl -->
+    <path d="M190 152 Q200 152 200 142 L200 152 Z" fill="#1E6FA0"/>
+
+    <!-- Stacked pages -->
+    <rect x="4" y="154" width="192" height="6" rx="3" fill="#122E42"/>
+    <rect x="10" y="160" width="180" height="4" rx="2" fill="#0E2233"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="200" y="228" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace" font-size="44" font-weight="700" fill="url(#s-text)" letter-spacing="2">runbook</text>
+
+  <!-- Tagline -->
+  <text x="200" y="260" text-anchor="middle" font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#7F8C8D" letter-spacing="3.5" text-transform="uppercase">EXECUTABLE RUNBOOKS AS CODE</text>
+</svg>

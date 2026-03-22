@@ -1,0 +1,15 @@
+---
+name: Global Timeout
+version: 1.0.0
+timeout: 500ms
+---
+
+# Global timeout applies to entire execution
+
+```step name="fast-step"
+echo "fast"
+```
+
+```step name="slow-step"
+sleep 60
+```

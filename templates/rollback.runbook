@@ -1,0 +1,65 @@
+---
+name: Manual Rollback
+version: 1.0.0
+description: Roll back a service to a previous known-good version
+owners: [platform-team, oncall]
+environments: [staging, production]
+requires:
+  tools: [kubectl, jq]
+timeout: 20m
+severity: critical
+---
+
+# Manual Rollback
+
+Roll back **{{service}}** in **{{env}}** to version **{{target_version}}**.
+Use this when an automated rollback did not trigger or a manual
+intervention is needed after a bad deploy.
+
+## Prerequisites
+
+```check name="verify-current-version"
+CURRENT=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.template.spec.containers[0].image}')
+echo "Current image: $CURRENT"
+test -n "$CURRENT"
+```
+
+```check name="verify-target-exists"
+echo "Target version: {{target_version}}"
+echo "Verifying image {{image}}:{{target_version}} is accessible..."
+kubectl run --rm -i --restart=Never verify-image --image={{image}}:{{target_version}} -- echo "Image exists" 2>/dev/null || true
+```
+
+## Step 1 — Roll Back Deployment
+
+```step name="rollback-deployment"
+  timeout: 180s
+  confirm: production
+---
+echo "Rolling back {{service}} to {{target_version}}"
+kubectl set image deployment/{{service}} app={{image}}:{{target_version}}
+kubectl rollout status deployment/{{service}} --timeout=120s
+echo "Rollback complete"
+```
+
+## Step 2 — Verify Health
+
+```step name="verify-health"
+  timeout: 60s
+---
+sleep 5
+HEALTH=$(curl -sf http://{{service}}.{{env}}.svc.cluster.local/health)
+echo "Health: $HEALTH"
+echo "$HEALTH" | jq -e '.status == "ok"'
+```
+
+## Step 3 — Confirm Version
+
+```step name="confirm-version"
+  timeout: 30s
+---
+RUNNING=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.template.spec.containers[0].image}')
+echo "Running image: $RUNNING"
+echo "$RUNNING" | grep -q "{{target_version}}"
+echo "Version confirmed: {{target_version}}"
+```

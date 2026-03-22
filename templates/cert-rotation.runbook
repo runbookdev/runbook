@@ -1,0 +1,93 @@
+---
+name: TLS Certificate Rotation
+version: 1.0.0
+description: Renew and deploy TLS certificates across services
+owners: [security-team, platform-team]
+environments: [staging, production]
+requires:
+  tools: [openssl, kubectl, jq]
+timeout: 1h
+---
+
+# TLS Certificate Rotation
+
+Renew the TLS certificate for **{{domain}}** and deploy it to all
+services in **{{env}}**. The old certificate is preserved for rollback.
+
+## Prerequisites
+
+```check name="current-cert-expiry"
+EXPIRY=$(echo | openssl s_client -servername {{domain}} -connect {{domain}}:443 2>/dev/null \
+  | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+echo "Current certificate expires: $EXPIRY"
+test -n "$EXPIRY"
+```
+
+```check name="new-cert-valid"
+echo "Validating new certificate at {{cert_path}}..."
+openssl x509 -in {{cert_path}} -noout -checkend 0
+SUBJECT=$(openssl x509 -in {{cert_path}} -noout -subject)
+echo "Subject: $SUBJECT"
+echo "$SUBJECT" | grep -q "{{domain}}"
+```
+
+## Step 1 — Back Up Current Certificate
+
+```step name="backup-cert" rollback="restore-cert"
+---
+echo "Backing up current TLS secret..."
+kubectl get secret {{tls_secret}} -o yaml > /tmp/tls-backup-{{tls_secret}}.yaml
+echo "Backup saved to /tmp/tls-backup-{{tls_secret}}.yaml"
+```
+
+```rollback name="restore-cert"
+echo "Restoring previous certificate from backup..."
+kubectl apply -f /tmp/tls-backup-{{tls_secret}}.yaml
+echo "Previous certificate restored"
+```
+
+## Step 2 — Deploy New Certificate
+
+```step name="deploy-cert" rollback="revert-cert"
+  confirm: production
+---
+echo "Deploying new certificate for {{domain}}..."
+kubectl create secret tls {{tls_secret}} \
+  --cert={{cert_path}} \
+  --key={{key_path}} \
+  --dry-run=client -o yaml | kubectl apply -f -
+echo "TLS secret {{tls_secret}} updated"
+```
+
+```rollback name="revert-cert"
+echo "Reverting to backed-up certificate..."
+kubectl apply -f /tmp/tls-backup-{{tls_secret}}.yaml
+echo "Certificate reverted"
+```
+
+## Step 3 — Restart Ingress
+
+```step name="restart-ingress"
+  timeout: 120s
+---
+echo "Restarting ingress to pick up new certificate..."
+kubectl rollout restart deployment/{{ingress_deployment}}
+kubectl rollout status deployment/{{ingress_deployment}} --timeout=90s
+echo "Ingress restarted"
+```
+
+## Step 4 — Verify New Certificate
+
+```step name="verify-cert"
+  timeout: 30s
+---
+sleep 5
+echo "Verifying certificate served by {{domain}}..."
+SERVED=$(echo | openssl s_client -servername {{domain}} -connect {{domain}}:443 2>/dev/null \
+  | openssl x509 -noout -fingerprint 2>/dev/null)
+EXPECTED=$(openssl x509 -in {{cert_path}} -noout -fingerprint 2>/dev/null)
+echo "Served:   $SERVED"
+echo "Expected: $EXPECTED"
+test "$SERVED" = "$EXPECTED"
+echo "Certificate verified"
+```

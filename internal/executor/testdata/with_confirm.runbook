@@ -1,0 +1,21 @@
+---
+name: With Confirm
+version: 1.0.0
+environments: [staging, production]
+---
+
+# Confirmation gates
+
+```step name="safe-step"
+echo "no confirm needed"
+```
+
+```step name="dangerous-step"
+  confirm: production
+---
+echo "confirmed and executed"
+```
+
+```step name="final-step"
+echo "all done"
+```

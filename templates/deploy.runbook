@@ -1,0 +1,97 @@
+---
+name: Deploy Service
+version: 1.0.0
+description: Deploy a service with canary verification and automatic rollback
+owners: [platform-team]
+environments: [staging, production]
+requires:
+  tools: [kubectl, jq, curl]
+  permissions: [k8s:deploy]
+  approvals:
+    production: [tech-lead]
+timeout: 30m
+severity: high
+---
+
+# Deploy Service
+
+Deploy **{{service}}** version **{{version}}** to **{{env}}** with canary
+traffic shifting, health verification, and automatic rollback on failure.
+
+## Prerequisites
+
+```check name="kubectl-context"
+kubectl config current-context | grep -q {{env}}
+echo "Context is set to {{env}}"
+```
+
+```check name="cluster-healthy"
+READY=$(kubectl get nodes --no-headers | grep -c ' Ready ')
+echo "$READY nodes ready"
+test "$READY" -ge 3
+```
+
+```check name="no-active-deploys"
+PENDING=$(kubectl rollout status deployment/{{service}} --timeout=5s 2>&1 || true)
+echo "$PENDING" | grep -q "successfully rolled out"
+```
+
+## Step 1 — Scale Canary
+
+```step name="deploy-canary" rollback="rollback-canary"
+  timeout: 120s
+  env: [staging, production]
+---
+kubectl set image deployment/{{service}}-canary app={{image}}:{{version}}
+kubectl rollout status deployment/{{service}}-canary --timeout=90s
+echo "Canary pod updated to {{version}}"
+```
+
+```rollback name="rollback-canary"
+kubectl rollout undo deployment/{{service}}-canary
+kubectl rollout status deployment/{{service}}-canary --timeout=60s
+```
+
+## Step 2 — Canary Health Gate
+
+```wait name="canary-soak" duration="60s"
+  abort_if: error_rate > 1%
+---
+for i in $(seq 1 6); do
+  STATUS=$(curl -sf http://{{service}}-canary.{{env}}.svc.cluster.local/health | jq -r '.status')
+  echo "Health check $i/6: $STATUS"
+  test "$STATUS" = "ok" || exit 1
+  sleep 10
+done
+```
+
+## Step 3 — Full Rollout
+
+```step name="deploy-primary" rollback="rollback-primary"
+  timeout: 300s
+  confirm: production
+---
+kubectl set image deployment/{{service}} app={{image}}:{{version}}
+kubectl rollout status deployment/{{service}} --timeout=240s
+echo "Primary deployment updated to {{version}}"
+```
+
+```rollback name="rollback-primary"
+kubectl rollout undo deployment/{{service}}
+kubectl rollout status deployment/{{service}} --timeout=120s
+echo "Rolled back primary deployment"
+```
+
+## Step 4 — Smoke Test
+
+```step name="smoke-test"
+  timeout: 60s
+---
+HEALTH=$(curl -sf http://{{service}}.{{env}}.svc.cluster.local/health)
+echo "Health response: $HEALTH"
+echo "$HEALTH" | jq -e '.status == "ok"'
+
+VERSION=$(curl -sf http://{{service}}.{{env}}.svc.cluster.local/version)
+echo "Running version: $VERSION"
+echo "$VERSION" | jq -e '.version == "{{version}}"'
+```

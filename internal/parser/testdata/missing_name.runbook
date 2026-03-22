@@ -1,0 +1,7 @@
+---
+name: Missing Name
+---
+
+```step
+echo "no name attribute"
+```

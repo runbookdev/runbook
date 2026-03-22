@@ -1,0 +1,30 @@
+---
+name: Step Fails With Rollback
+version: 1.0.0
+---
+
+# Step failure triggers rollback
+
+```step name="setup" rollback="undo-setup"
+echo "setup done"
+```
+
+```step name="migrate" rollback="undo-migrate"
+echo "migrate done"
+```
+
+```step name="deploy"
+echo "about to fail" && exit 1
+```
+
+```step name="verify"
+echo "should not run"
+```
+
+```rollback name="undo-setup"
+echo "rolling back setup"
+```
+
+```rollback name="undo-migrate"
+echo "rolling back migrate"
+```

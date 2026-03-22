@@ -1,0 +1,98 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            build:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
+              - '.github/workflows/*.yml'
+
+  build:
+    name: Tests on ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.build == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+    env:
+      TZ: UTC
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"
+          check-latest: false
+          cache-dependency-path: "**/*.sum"
+      - run: go version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: Vendoring and Tidy
+        run: go mod tidy && go mod vendor
+      - name: Install dependencies
+        run: go mod download
+      - name: Run Linter
+        if: matrix.os == 'linux'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.3
+          args: --timeout 10m --config .golangci.yml
+      - name: Install go-acc
+        run: |
+          go install github.com/ory/go-acc@latest
+      - name: Run tests
+        shell: bash
+        run: |
+          go-acc ./... -o coverage.out --ignore examples -- -mod=vendor -p 1 -timeout 0 -race -v
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'linux'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          fail_ci_if_error: false
+          verbose: true
+          slug: runbookdev/runbook

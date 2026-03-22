@@ -1,0 +1,26 @@
+---
+name: Dry Run Demo
+version: 1.0.0
+timeout: 10m
+---
+
+# Dry Run
+
+```check name="health-check"
+curl -sf http://localhost/health
+```
+
+```step name="deploy" rollback="undo-deploy"
+  timeout: 120s
+  confirm: production
+---
+echo "deploying"
+```
+
+```step name="verify"
+echo "verifying"
+```
+
+```rollback name="undo-deploy"
+echo "rolling back deploy"
+```

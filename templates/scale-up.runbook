@@ -1,0 +1,86 @@
+---
+name: Horizontal Scale-Up
+version: 1.0.0
+description: Scale a service horizontally in response to load
+owners: [platform-team]
+environments: [staging, production]
+requires:
+  tools: [kubectl, jq]
+timeout: 20m
+---
+
+# Horizontal Scale-Up
+
+Scale **{{service}}** from its current replica count to **{{target_replicas}}**
+in **{{env}}**. Use this during anticipated traffic spikes or when auto-scaling
+thresholds have not been met.
+
+## Prerequisites
+
+```check name="current-capacity"
+CURRENT=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.replicas}')
+echo "Current replicas: $CURRENT"
+echo "Target replicas:  {{target_replicas}}"
+test "{{target_replicas}}" -gt "$CURRENT"
+```
+
+```check name="cluster-capacity"
+ALLOCATABLE=$(kubectl get nodes -o json | jq '[.items[].status.allocatable.cpu | rtrimstr("m") | tonumber] | add')
+REQUESTED=$(kubectl get pods --all-namespaces -o json | jq '[.items[].spec.containers[].resources.requests.cpu // "0m" | rtrimstr("m") | tonumber] | add')
+echo "CPU allocatable: ${ALLOCATABLE}m"
+echo "CPU requested:   ${REQUESTED}m"
+echo "Headroom:        $(( ALLOCATABLE - REQUESTED ))m"
+```
+
+## Step 1 — Scale Deployment
+
+```step name="scale-deployment" rollback="scale-back"
+  timeout: 180s
+  confirm: production
+---
+BEFORE=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.replicas}')
+echo "Scaling {{service}} from $BEFORE to {{target_replicas}}..."
+kubectl scale deployment/{{service}} --replicas={{target_replicas}}
+kubectl rollout status deployment/{{service}} --timeout=150s
+AFTER=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.replicas}')
+echo "Scaled: $BEFORE -> $AFTER replicas"
+```
+
+```rollback name="scale-back"
+echo "Scaling back to previous replica count..."
+kubectl scale deployment/{{service}} --replicas={{original_replicas}}
+kubectl rollout status deployment/{{service}} --timeout=120s
+```
+
+## Step 2 — Verify Pods Healthy
+
+```wait name="pod-stabilization" duration="30s"
+---
+echo "Waiting for new pods to stabilize..."
+sleep 30
+echo "Stabilization period complete"
+```
+
+```step name="verify-all-ready"
+  timeout: 30s
+---
+READY=$(kubectl get deployment/{{service}} -o jsonpath='{.status.readyReplicas}')
+DESIRED=$(kubectl get deployment/{{service}} -o jsonpath='{.spec.replicas}')
+echo "Ready: $READY / $DESIRED"
+test "$READY" = "$DESIRED"
+echo "All replicas healthy"
+```
+
+## Step 3 — Verify Service
+
+```step name="verify-traffic"
+  timeout: 30s
+---
+echo "Sending test requests to verify load distribution..."
+for i in $(seq 1 5); do
+  STATUS=$(curl -sf -o /dev/null -w '%{http_code}' http://{{service}}.{{env}}.svc.cluster.local/health)
+  echo "  Request $i: HTTP $STATUS"
+  test "$STATUS" = "200"
+done
+echo "Traffic distribution verified"
+```

@@ -1,0 +1,104 @@
+---
+name: Database Migration
+version: 1.0.0
+description: Run database schema migrations with backup and rollback
+owners: [data-team]
+environments: [staging, production]
+requires:
+  tools: [psql]
+  approvals:
+    production: [data-lead]
+timeout: 1h
+---
+
+# Database Migration
+
+Apply schema migration **{{migration_version}}** to the **{{db_name}}**
+database in **{{env}}**. Includes a pre-migration backup and automatic
+rollback on failure.
+
+## Prerequisites
+
+```check name="db-connection"
+psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -c "SELECT version();" > /dev/null
+echo "Connected to {{db_name}} on {{db_host}}"
+```
+
+```check name="pending-migrations"
+echo "Checking pending migrations..."
+CURRENT=$(psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -tAc \
+  "SELECT MAX(version) FROM schema_migrations;" 2>/dev/null || echo "none")
+echo "Current schema version: $CURRENT"
+echo "Target schema version:  {{migration_version}}"
+```
+
+```check name="no-active-connections"
+ACTIVE=$(psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -tAc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname='{{db_name}}' AND state='active' AND pid != pg_backend_pid();")
+echo "Active connections: $ACTIVE"
+test "$ACTIVE" -lt 50
+```
+
+## Step 1 — Create Backup
+
+```step name="backup-database" rollback="restore-backup"
+  timeout: 600s
+  confirm: production
+---
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="/tmp/{{db_name}}_pre_migration_${TIMESTAMP}.sql.gz"
+echo "Creating backup: $BACKUP_FILE"
+pg_dump -h {{db_host}} -U {{db_user}} -d {{db_name}} --format=custom | gzip > "$BACKUP_FILE"
+echo "Backup complete: $(du -h "$BACKUP_FILE" | cut -f1)"
+```
+
+```rollback name="restore-backup"
+echo "Restoring database from most recent backup..."
+BACKUP_FILE=$(ls -t /tmp/{{db_name}}_pre_migration_*.sql.gz 2>/dev/null | head -1)
+if [ -z "$BACKUP_FILE" ]; then
+  echo "ERROR: No backup file found"
+  exit 1
+fi
+echo "Restoring from: $BACKUP_FILE"
+gunzip -c "$BACKUP_FILE" | pg_restore -h {{db_host}} -U {{db_user}} -d {{db_name}} --clean --if-exists
+echo "Restore complete"
+```
+
+## Step 2 — Run Migration
+
+```step name="apply-migration" rollback="rollback-migration"
+  timeout: 300s
+  env: [staging, production]
+---
+echo "Applying migration {{migration_version}}..."
+psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -f {{migration_file}} -v ON_ERROR_STOP=1
+echo "Migration {{migration_version}} applied"
+```
+
+```rollback name="rollback-migration"
+echo "Rolling back migration {{migration_version}}..."
+psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -f {{rollback_file}} -v ON_ERROR_STOP=1
+echo "Migration rolled back"
+```
+
+## Step 3 — Verify Schema
+
+```step name="verify-schema"
+  timeout: 30s
+---
+VERSION=$(psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -tAc \
+  "SELECT MAX(version) FROM schema_migrations;")
+echo "Schema version after migration: $VERSION"
+test "$VERSION" = "{{migration_version}}"
+echo "Schema verified"
+```
+
+## Step 4 — Smoke Test Queries
+
+```step name="smoke-test-queries"
+  timeout: 30s
+---
+echo "Running smoke test queries..."
+psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';"
+echo "Smoke test passed"
+```

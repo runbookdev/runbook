@@ -1,0 +1,89 @@
+---
+name: System Health Check
+version: 1.0.0
+description: Comprehensive system-wide health verification
+owners: [sre-team]
+environments: [staging, production]
+requires:
+  tools: [curl, jq, kubectl]
+timeout: 15m
+---
+
+# System Health Check
+
+Verify the health of all critical systems in **{{env}}**. Run this
+before deployments, after incidents, or as a periodic confidence check.
+
+## Infrastructure
+
+```check name="kubernetes-nodes"
+NODES=$(kubectl get nodes --no-headers)
+TOTAL=$(echo "$NODES" | wc -l | tr -d ' ')
+READY=$(echo "$NODES" | grep -c ' Ready ')
+echo "Nodes: $READY/$TOTAL ready"
+test "$READY" -ge "$TOTAL"
+```
+
+```check name="kubernetes-system-pods"
+NOT_RUNNING=$(kubectl get pods -n kube-system --no-headers | grep -v Running | grep -v Completed | wc -l | tr -d ' ')
+echo "Non-running system pods: $NOT_RUNNING"
+test "$NOT_RUNNING" -eq 0
+```
+
+## Core Services
+
+```step name="check-api-gateway"
+  timeout: 30s
+---
+echo "Checking API gateway..."
+STATUS=$(curl -sf -o /dev/null -w '%{http_code}' http://api-gateway.{{env}}.svc.cluster.local/health)
+echo "  API Gateway: HTTP $STATUS"
+test "$STATUS" = "200"
+```
+
+```step name="check-auth-service"
+  timeout: 30s
+---
+echo "Checking auth service..."
+RESP=$(curl -sf http://auth.{{env}}.svc.cluster.local/health)
+echo "  Auth: $RESP"
+echo "$RESP" | jq -e '.status == "ok"'
+```
+
+```step name="check-user-service"
+  timeout: 30s
+---
+echo "Checking user service..."
+RESP=$(curl -sf http://users.{{env}}.svc.cluster.local/health)
+echo "  Users: $RESP"
+echo "$RESP" | jq -e '.status == "ok"'
+```
+
+## Data Stores
+
+```step name="check-database"
+  timeout: 15s
+---
+echo "Checking primary database..."
+psql -h {{db_host}} -U {{db_user}} -d {{db_name}} -c "SELECT 1;" > /dev/null 2>&1
+echo "  Database: OK"
+```
+
+```step name="check-redis"
+  timeout: 10s
+---
+echo "Checking Redis..."
+PONG=$(redis-cli -h {{redis_host}} ping 2>/dev/null || echo "FAILED")
+echo "  Redis: $PONG"
+test "$PONG" = "PONG"
+```
+
+## Summary
+
+```step name="health-summary"
+echo "=== Health Check Complete ==="
+echo "Environment: {{env}}"
+echo "Timestamp:   {{timestamp}}"
+echo "Run by:      {{user}}@{{hostname}}"
+echo "All checks passed"
+```

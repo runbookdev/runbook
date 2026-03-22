@@ -1,0 +1,18 @@
+---
+name: Check Fails
+version: 1.0.0
+---
+
+# Failing precondition
+
+```check name="always-pass"
+echo "ok"
+```
+
+```check name="always-fail"
+exit 1
+```
+
+```step name="should-not-run"
+echo "this should never execute"
+```

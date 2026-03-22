@@ -1,0 +1,9 @@
+---
+name:
+---
+
+# Missing name triggers validation error
+
+```step name="deploy"
+echo deploy
+```

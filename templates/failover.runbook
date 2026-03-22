@@ -1,0 +1,106 @@
+---
+name: Database Failover
+version: 1.0.0
+description: Promote a database replica to primary during an outage
+owners: [data-team, sre-team]
+environments: [staging, production]
+requires:
+  tools: [psql, jq, curl]
+  approvals:
+    production: [data-lead, sre-lead]
+timeout: 45m
+severity: critical
+---
+
+# Database Failover
+
+Promote the read replica **{{replica_host}}** to primary when the
+current primary **{{primary_host}}** is unresponsive or degraded.
+
+> **Warning**: This is a destructive operation. The old primary must be
+> rebuilt as a replica after failover completes.
+
+## Prerequisites
+
+```check name="replica-healthy"
+psql -h {{replica_host}} -U {{db_user}} -d {{db_name}} -c "SELECT 1;" > /dev/null
+echo "Replica {{replica_host}} is reachable"
+```
+
+```check name="replica-lag"
+LAG=$(psql -h {{replica_host}} -U {{db_user}} -d {{db_name}} -tAc \
+  "SELECT EXTRACT(EPOCH FROM replay_lag)::int FROM pg_stat_replication_slots;" 2>/dev/null || echo "0")
+echo "Replication lag: ${LAG}s"
+test "${LAG:-0}" -lt 30
+```
+
+```check name="primary-unreachable"
+echo "Confirming primary {{primary_host}} is degraded..."
+if psql -h {{primary_host}} -U {{db_user}} -d {{db_name}} -c "SELECT 1;" --connect-timeout=5 2>/dev/null; then
+  echo "WARNING: Primary is still reachable. Confirm you want to proceed."
+  exit 1
+fi
+echo "Primary confirmed unreachable — failover is appropriate"
+```
+
+## Step 1 — Fence the Old Primary
+
+```step name="fence-primary" rollback="unfence-primary"
+  confirm: production
+---
+echo "Updating DNS to remove old primary..."
+echo "TODO: remove {{primary_host}} from DNS / load balancer"
+echo "Fencing complete — no new connections to old primary"
+```
+
+```rollback name="unfence-primary"
+echo "Restoring old primary in DNS..."
+echo "TODO: re-add {{primary_host}} to DNS / load balancer"
+```
+
+## Step 2 — Promote Replica
+
+```step name="promote-replica"
+  timeout: 120s
+  confirm: production
+---
+echo "Promoting {{replica_host}} to primary..."
+psql -h {{replica_host}} -U {{db_user}} -d {{db_name}} -c "SELECT pg_promote();"
+echo "Waiting for promotion to complete..."
+sleep 5
+IS_PRIMARY=$(psql -h {{replica_host}} -U {{db_user}} -d {{db_name}} -tAc "SELECT NOT pg_is_in_recovery();")
+echo "Is primary: $IS_PRIMARY"
+test "$IS_PRIMARY" = "t"
+```
+
+## Step 3 — Update Connection Strings
+
+```step name="update-connections" rollback="revert-connections"
+  timeout: 60s
+---
+echo "Updating application connection strings..."
+echo "TODO: update config/secret to point to {{replica_host}}"
+echo "TODO: restart application pods to pick up new connection"
+```
+
+```rollback name="revert-connections"
+echo "Reverting connection strings to old primary..."
+echo "TODO: restore original connection config"
+```
+
+## Step 4 — Verify Applications
+
+```wait name="connection-drain" duration="30s"
+---
+echo "Waiting for connection pool drain and reconnect..."
+sleep 30
+echo "Drain complete"
+```
+
+```step name="verify-app-connectivity"
+  timeout: 60s
+---
+echo "Checking application can reach new primary..."
+curl -sf http://{{app_service}}.{{env}}.svc.cluster.local/health | jq '.'
+echo "Application connectivity verified"
+```
