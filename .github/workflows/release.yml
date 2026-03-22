@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"
+          cache-dependency-path: "**/*.sum"
+
+      # Zig is used as the C cross-compiler for all targets.
+      # It can target Linux (musl), macOS, and Windows from a single
+      # Linux host — no osxcross or MinGW needed.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Add zig-cc to PATH
+        run: |
+          chmod +x scripts/zig-cc scripts/zig-cxx
+          echo "${{ github.workspace }}/scripts" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          go version
+          zig version
+          zig-cc linux amd64 --version
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> 2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

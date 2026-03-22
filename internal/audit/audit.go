@@ -195,7 +195,6 @@ func (l *Logger) EndRun(runID, status string, finishedAt time.Time) error {
 	return nil
 }
 
-// GetRun queries a specific run and all its step logs.
 // GetRun queries a specific run and all its step logs. The runID can be a
 // prefix — if it does not match exactly, the query falls back to a LIKE
 // prefix match. This allows callers to use truncated IDs from list output.
@@ -227,7 +226,9 @@ func (l *Logger) GetRun(runID string) (*RunRecord, []StepLog, error) {
 	r.Variables = make(map[string]string)
 	_ = json.Unmarshal([]byte(varsJSON), &r.Variables)
 
-	steps, err := l.queryStepLogs(runID)
+	// Use the resolved full ID for the step logs query, not the
+	// potentially truncated prefix the caller passed in.
+	steps, err := l.queryStepLogs(r.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +251,7 @@ func (l *Logger) ListRuns(limit int) ([]RunRecord, error) {
 	}
 	defer rows.Close()
 
-	var runs []RunRecord
+	runs := make([]RunRecord, 0, limit)
 	for rows.Next() {
 		var r RunRecord
 		var startedStr, finishedStr sql.NullString

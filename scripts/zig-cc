@@ -1,0 +1,22 @@
+#!/bin/sh
+# zig-cc — wraps `zig cc` as a C compiler for CGO cross-compilation.
+# Usage: CC="zig-cc linux arm64" go build ...
+#
+# GoReleaser sets CC per target via overrides. This script translates
+# GOOS/GOARCH into the zig target triple.
+set -e
+
+GOOS="$1"
+GOARCH="$2"
+shift 2
+
+case "${GOOS}-${GOARCH}" in
+  linux-amd64)   TARGET="x86_64-linux-musl" ;;
+  linux-arm64)   TARGET="aarch64-linux-musl" ;;
+  darwin-amd64)  TARGET="x86_64-macos"      ;;
+  darwin-arm64)  TARGET="aarch64-macos"      ;;
+  windows-amd64) TARGET="x86_64-windows-gnu" ;;
+  *) echo "zig-cc: unsupported ${GOOS}/${GOARCH}" >&2; exit 1 ;;
+esac
+
+exec zig cc -target "${TARGET}" "$@"

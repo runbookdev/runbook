@@ -108,16 +108,13 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 	}
 
 	// 3. Environment variables with RUNBOOK_ prefix.
-	envVars := make(map[string]string)
+	const runbookPrefix = "RUNBOOK_"
 	for _, kv := range os.Environ() {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) == 2 && strings.HasPrefix(parts[0], "RUNBOOK_") {
-			key := strings.TrimPrefix(parts[0], "RUNBOOK_")
-			key = strings.ToLower(key)
-			envVars[key] = parts[1]
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && strings.HasPrefix(k, runbookPrefix) {
+			context[strings.ToLower(strings.TrimPrefix(k, runbookPrefix))] = v
 		}
 	}
-	maps.Copy(context, envVars)
 
 	// 4. CLI flags (highest priority).
 	maps.Copy(context, cliVars)

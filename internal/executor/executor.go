@@ -115,7 +115,7 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 
 	// Build the command using a plain exec.Command (no CommandContext).
 	// We manage timeouts ourselves via process group signals.
-	cmd := exec.Command(shell, "-c", fmt.Sprintf(`cat %q | %s`, tmpPath, shell))
+	cmd := exec.Command(shell, tmpPath)
 	cmd.Dir = e.WorkDir
 
 	// Set up process group so we can kill child processes on timeout.
@@ -124,7 +124,7 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 	// Build environment: inherit current env + RUNBOOK_* vars.
 	cmd.Env = os.Environ()
 	for k, v := range e.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("RUNBOOK_%s=%s", strings.ToUpper(k), v))
+		cmd.Env = append(cmd.Env, "RUNBOOK_"+strings.ToUpper(k)+"="+v)
 	}
 
 	// Set up output capture with size limits.
@@ -264,6 +264,9 @@ func killProcessGroup(cmd *exec.Cmd, grace time.Duration) {
 	}
 }
 
+// newlineByte avoids allocating []byte("\n") on every iteration.
+var newlineByte = []byte{'\n'}
+
 // streamLines reads from r line-by-line, writing each line to both the
 // prefixed writer (for real-time display) and the buffer (for capture).
 func streamLines(r io.Reader, prefix io.Writer, buf *limitedBuffer) {
@@ -274,29 +277,38 @@ func streamLines(r io.Reader, prefix io.Writer, buf *limitedBuffer) {
 		_, _ = prefix.Write(line)
 		// Write to the capture buffer.
 		buf.Write(line)
-		buf.Write([]byte("\n"))
+		buf.Write(newlineByte)
 	}
 }
 
 // prefixWriter wraps each Write call with a "[step-name] | " prefix.
 type prefixWriter struct {
-	prefix []byte
-	w      io.Writer
+	prefix  []byte
+	w       io.Writer
+	scratch []byte // reusable buffer to reduce per-line allocations
 }
 
 func newPrefixWriter(stepName string, w io.Writer) *prefixWriter {
 	return &prefixWriter{
-		prefix: []byte(fmt.Sprintf("[%s] | ", stepName)),
+		prefix: append(append([]byte("["), stepName...), "] | "...),
 		w:      w,
 	}
 }
 
 func (p *prefixWriter) Write(data []byte) (int, error) {
 	// Write prefix + data + newline as a single write to avoid interleaving.
-	buf := make([]byte, 0, len(p.prefix)+len(data)+1)
+	// Reuse the scratch buffer when possible to reduce allocations.
+	needed := len(p.prefix) + len(data) + 1
+	buf := p.scratch
+	if cap(buf) < needed {
+		buf = make([]byte, 0, needed)
+	} else {
+		buf = buf[:0]
+	}
 	buf = append(buf, p.prefix...)
 	buf = append(buf, data...)
 	buf = append(buf, '\n')
+	p.scratch = buf // keep for reuse
 	_, err := p.w.Write(buf)
 	if err != nil {
 		return 0, err

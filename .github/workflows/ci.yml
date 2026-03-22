@@ -45,54 +45,58 @@ jobs:
         include:
           - os: linux
             runner: ubuntu-latest
+          - os: macos
+            runner: macos-latest
     env:
       TZ: UTC
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
-      GOFLAGS: -mod=readonly
+      GOFLAGS: -mod=vendor
 
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: false
           fetch-depth: 0
+
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.0"
           check-latest: false
           cache-dependency-path: "**/*.sum"
+
       - run: go version
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-      - name: Vendoring and Tidy
+
+      - name: Vendor modules
         run: go mod tidy && go mod vendor
-      - name: Install dependencies
-        run: go mod download
-      - name: Run Linter
+
+      - name: Build
+        run: make build
+
+      - name: Run linter
         if: matrix.os == 'linux'
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.3
           args: --timeout 10m --config .golangci.yml
-      - name: Install go-acc
-        run: |
-          go install github.com/ory/go-acc@latest
+
       - name: Run tests
         shell: bash
+        run: go test -race -count=1 -timeout 10m -v ./...
+
+      - name: Validate templates
+        run: make validate-templates
+
+      - name: Verify binary
         run: |
-          go-acc ./... -o coverage.out --ignore examples -- -mod=vendor -p 1 -timeout 0 -race -v
-      - name: Upload coverage to Codecov
+          ./bin/runbook version
+          ./bin/runbook --help
+
+      - name: Upload coverage
         if: matrix.os == 'linux'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.out
           fail_ci_if_error: false
           verbose: true
           slug: runbookdev/runbook

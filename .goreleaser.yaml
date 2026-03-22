@@ -1,0 +1,131 @@
+version: 2
+
+project_name: runbook
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod vendor
+
+builds:
+  - id: runbook
+    main: ./cmd/runbook
+    binary: runbook
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    env:
+      - CGO_ENABLED=1
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig-cc linux amd64
+          - CXX=zig-cxx linux amd64
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig-cc linux arm64
+          - CXX=zig-cxx linux arm64
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig-cc darwin amd64
+          - CXX=zig-cxx darwin amd64
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig-cc darwin arm64
+          - CXX=zig-cxx darwin arm64
+      - goos: windows
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig-cc windows amd64
+          - CXX=zig-cxx windows amd64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - templates/*.runbook
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: runbookdev
+    name: runbook
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+  header: |
+    ## runbook {{ .Version }}
+
+    ### Install
+
+    ```bash
+    # Homebrew
+    brew install runbookdev/tap/runbook
+
+    # Download binary
+    curl -sL https://github.com/runbookdev/runbook/releases/download/{{ .Tag }}/runbook_{{ .Version }}_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz | tar xz
+    ```
+
+    **Full Changelog**: https://github.com/runbookdev/runbook/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+brews:
+  - repository:
+      owner: runbookdev
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/runbookdev/runbook"
+    description: "Executable runbooks as code — documentation and automation in a single file format"
+    license: "Apache-2.0"
+    dependencies:
+      - name: sqlite
+        type: optional
+    install: |
+      bin.install "runbook"
+      prefix.install Dir["templates"]
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/runbook version")

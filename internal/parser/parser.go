@@ -106,7 +106,7 @@ func extractBlocks(filePath, body string, tree *ast.RunbookAST) error {
 
 		// Collect block content until closing ```
 		i++
-		var blockLines []string
+		blockLines := make([]string, 0, 16)
 		closed := false
 		for i < len(lines) {
 			if strings.TrimSpace(lines[i]) == "```" {
@@ -218,16 +218,20 @@ func buildNode(filePath, blockType string, attrs map[string]string, content stri
 }
 
 // splitBlockContent separates a block body into metadata lines and the command.
-// If the body contains a --- separator, lines before it are metadata and lines after
-// are the command. Otherwise the entire body is the command.
+// If the body contains a "\n---\n" separator, text before it is metadata and
+// text after is the command. Otherwise the entire body is the command.
 func splitBlockContent(content string) (command, meta string) {
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "---" {
-			meta = strings.Join(lines[:i], "\n")
-			command = strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
-			return command, meta
-		}
+	// Fast path: find the separator without splitting into lines.
+	idx := strings.Index(content, "\n---\n")
+	if idx >= 0 {
+		meta = content[:idx]
+		command = strings.TrimSpace(content[idx+5:])
+		return command, meta
+	}
+	// Handle trailing "---" at end of content (no trailing newline).
+	if strings.HasSuffix(content, "\n---") {
+		meta = content[:len(content)-4]
+		return "", meta
 	}
 	return strings.TrimSpace(content), ""
 }
@@ -271,13 +275,11 @@ func applyWaitMeta(node *ast.WaitNode, meta string) {
 // parseMetaLine splits "  key: value" into key and value.
 func parseMetaLine(line string) (string, string) {
 	line = strings.TrimSpace(line)
-	idx := strings.IndexByte(line, ':')
-	if idx < 0 {
+	key, value, ok := strings.Cut(line, ":")
+	if !ok {
 		return "", ""
 	}
-	key := strings.TrimSpace(line[:idx])
-	value := strings.TrimSpace(line[idx+1:])
-	return key, value
+	return strings.TrimSpace(key), strings.TrimSpace(value)
 }
 
 // parseList parses a bracketed list like "[staging, production]" into a string slice.
