@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !windows
+
 // Security-focused test suite for the executor, resolver, audit, and validator
 // subsystems. Each test is identified by a threat ID (T8–T29) matching the
 // security design doc.

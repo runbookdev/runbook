@@ -1,6 +1,9 @@
-#!/bin/sh
+#!/bin/bash
 # zig-cxx — wraps `zig c++` as a C++ compiler for CGO cross-compilation.
 # Usage: CXX="zig-cxx linux arm64" go build ...
+#
+# When the target matches the host, falls back to the native clang++ to avoid
+# needing the macOS SDK in zig's cross-compilation environment.
 set -e
 
 GOOS="$1"
@@ -15,5 +18,26 @@ case "${GOOS}-${GOARCH}" in
   windows-amd64) TARGET="x86_64-windows-gnu" ;;
   *) echo "zig-cxx: unsupported ${GOOS}/${GOARCH}" >&2; exit 1 ;;
 esac
+
+HOST_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+HOST_ARCH=$(uname -m)
+[ "${HOST_ARCH}" = "aarch64" ] && HOST_ARCH="arm64"
+[ "${HOST_ARCH}" = "x86_64"  ] && HOST_ARCH="amd64"
+
+# Native build: let the system compiler handle it.
+if [ "${GOOS}" = "${HOST_OS}" ] && [ "${GOARCH}" = "${HOST_ARCH}" ]; then
+  exec clang++ "$@"
+fi
+
+# Cross-compiling to darwin: strip -lresolv (part of libSystem, unavailable
+# in zig's cross-compilation environment).
+if [ "${GOOS}" = "darwin" ]; then
+  args=()
+  for arg in "$@"; do
+    [ "${arg}" = "-lresolv" ] && continue
+    args+=("${arg}")
+  done
+  exec zig c++ -target "${TARGET}" "${args[@]}"
+fi
 
 exec zig c++ -target "${TARGET}" "$@"
