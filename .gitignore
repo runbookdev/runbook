@@ -41,3 +41,6 @@ docs/SETUP.md
 
 .DS_Store
 Thumbs.db
+
+# Zig cache
+.zig-cache/
