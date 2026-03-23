@@ -5,11 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2026-03-23 - v0.1.0
+## 2026-03-23
 
 ### Added
 
 #### Core execution engine
+
 - **Step executor** with full process-group management — `SIGTERM` → 10s grace → `SIGKILL` cascade covers child processes on Linux and macOS
 - **Automatic rollback** — LIFO stack of `rollback` blocks executed in reverse order on step failure; best-effort (failures are logged and remaining rollbacks continue)
 - **Dry-run mode** — previews the full execution plan without running any commands
@@ -20,24 +21,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Non-interactive mode** (`--non-interactive`) — auto-accepts all confirmation prompts for use in CI
 
 #### File format
+
 - **`.runbook` format** — extended Markdown with typed, fenced code blocks and YAML frontmatter
 - Four block types: `check` (precondition), `step` (executable unit), `rollback` (recovery handler), `wait` (timed pause)
 - Frontmatter fields: `name`, `version`, `environments`, `requires.tools`, `timeout`
 
 #### Template variable resolution
+
 - `{{name}}` syntax resolved via a four-level priority chain: CLI flags → environment variables → `.env` file → built-in variables
 - Built-in variables: `{{env}}`, `{{runbook_name}}`, `{{runbook_version}}`, `{{run_id}}`, `{{timestamp}}`, `{{user}}`, `{{hostname}}`, `{{cwd}}`
 - `--var key=value` flag (repeatable) and `--env-file <path>` for loading variables from a file
 
 #### Parser
+
 - Lexer and AST builder for `.runbook` files
 - **Parser hardening** — files are rejected if they: exceed 1 MB, contain non-UTF-8 bytes, define more than 1,000 blocks, include unknown frontmatter fields, or have frontmatter larger than 64 KB
 
 #### Validator
+
 - 12 static-analysis validation rules with did-you-mean suggestions
 - **Security rules** — detects credential patterns in commands, plain-HTTP `wget` fetches, pipe-to-shell patterns, and `.env` files not listed in `.gitignore`
 
 #### Security capabilities (`runbook doctor`)
+
 - New `doctor` command for health-checking the local installation and runbook files
 - **`.env` permission checks** — warns when a `.env` file is world-readable (not `0600`)
 - **Secret redaction** in audit logs — variables whose names contain `SECRET`, `PASSWORD`, `TOKEN`, `KEY`, or `CREDENTIAL` are automatically redacted before storage
@@ -46,11 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Orphan process cleanup** — dedicated Linux and non-Linux implementations ensure no child processes leak after step completion
 
 #### Audit trail
+
 - Full audit log persisted to a local SQLite database at `~/.runbook/audit/runbook.db`
 - `runbook history` command — list recent runs with `--limit` and inspect a specific run with `--run-id` (prefix match)
 - `--audit-dir` flag on `runbook run` for a custom audit database path
 
 #### CLI commands
+
 - `runbook run <file>` — execute a runbook (`--env`, `--var`, `--env-file`, `--non-interactive`, `--dry-run`, `--verbose`, `--audit-dir`, `--no-color`)
 - `runbook validate <file>` — parse and validate; exits `0` on success, `3` on validation errors
 - `runbook dry-run <file>` — alias for `run --dry-run`
@@ -61,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `runbook version` — print version, commit, build date, Go version, and platform
 
 #### Exit codes
+
 | Code | Meaning          |
 |------|------------------|
 | `0`  | Success          |
@@ -72,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `20` | Internal error   |
 
 #### Built-in templates
+
 10 production-ready templates scaffoldable via `runbook init --template=<name>`:
 
 | Template            | Description                                              |
@@ -88,22 +98,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `secret-rotation`   | Rotate API keys and credentials with zero downtime       |
 
 #### Distribution
+
 - Homebrew tap (`runbookdev/tap/runbook`) for macOS and Linux
 - `go install github.com/runbookdev/runbook/cmd/runbook@latest`
 - GitHub Releases with pre-built binaries (cross-compiled via Zig toolchain)
 - GoReleaser configuration for automated release pipeline
 
 #### Examples
+
 - `examples/getting-started/` — annotated walkthrough runbook covering checks, steps, rollbacks, waits, variables, and confirmation gates
 - `examples/docker-compose-deploy/` — real-world Docker Compose service deployment with health checks, migrations, and rollback
 
 #### Configuration
+
 - `~/.runbook/config.yaml` for persistent defaults (`env`, `env_file`, `audit_dir`, `non_interactive`, `no_color`, `shell`)
 - CLI flags always override config file values
 
 ### Changed
+
 - Refactored internal package structure: `parser`, `validator`, `resolver`, `executor`, `audit`, `cli`
 - Improved CI pipeline with lint, test, and multi-platform build steps
 - Updated Go toolchain requirement to Go 1.26
 
-[Unreleased]: https://github.com/runbookdev/runbook/compare/HEAD...HEAD

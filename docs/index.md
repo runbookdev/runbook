@@ -28,9 +28,10 @@ One file, one commit, one review. Documentation and automation can never drift a
 
 ## Reference
 
-|                                    |                                     |
-|------------------------------------|-------------------------------------|
-| [Built-in templates](templates.md) | 10 production-ready starting points |
+|                                             |                                                 |
+|---------------------------------------------|-------------------------------------------------|
+| [Built-in templates](templates.md)          | 10 production-ready starting points             |
+| [Release notes: v0.3.0](reference/0.3.0.md) | Consolidated release summary based on changelog |
 
 ---
 
