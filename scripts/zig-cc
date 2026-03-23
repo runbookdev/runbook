@@ -29,12 +29,22 @@ if [ "${GOOS}" = "${HOST_OS}" ] && [ "${GOARCH}" = "${HOST_ARCH}" ]; then
   exec clang "$@"
 fi
 
-# Cross-compiling to darwin: strip -lresolv (part of libSystem, unavailable
-# in zig's cross-compilation environment).
+# Cross-compiling to darwin: strip flags that reference macOS SDK components
+# unavailable in zig's cross-compilation environment (-lresolv is part of
+# libSystem; -framework CoreFoundation requires the SDK headers/stubs).
 if [ "${GOOS}" = "darwin" ]; then
   args=()
+  skip_next=false
   for arg in "$@"; do
+    if $skip_next; then
+      skip_next=false
+      continue
+    fi
     [ "${arg}" = "-lresolv" ] && continue
+    if [ "${arg}" = "-framework" ]; then
+      skip_next=true
+      continue
+    fi
     args+=("${arg}")
   done
   exec zig cc -target "${TARGET}" "${args[@]}"
