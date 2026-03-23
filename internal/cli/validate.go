@@ -26,11 +26,17 @@ import (
 )
 
 func newValidateCmd() *cobra.Command {
-	return &cobra.Command{
+	var securityStrict bool
+
+	cmd := &cobra.Command{
 		Use:   "validate <file>",
 		Short: "Validate a .runbook file",
 		Long: `Parse and validate a .runbook file, reporting all errors and warnings.
-Exits with code 0 if valid, 3 if there are errors.`,
+Exits with code 0 if valid, 3 if there are errors.
+
+Security advisory rules (v15–v20) produce warnings by default. Use
+--security-strict to promote them to errors so CI pipelines fail on
+any security advisory.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			filePath := args[0]
@@ -46,7 +52,8 @@ Exits with code 0 if valid, 3 if there are errors.`,
 				return err
 			}
 
-			errs := validator.Validate(tree)
+			opts := validator.Options{SecurityStrict: securityStrict}
+			errs := validator.Validate(tree, opts)
 
 			red := color.New(color.FgRed)
 			yellow := color.New(color.FgYellow)
@@ -83,4 +90,9 @@ Exits with code 0 if valid, 3 if there are errors.`,
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&securityStrict, "security-strict", false,
+		"promote security advisory warnings (v15–v20) to errors")
+
+	return cmd
 }

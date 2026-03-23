@@ -15,9 +15,13 @@
 package validator
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -61,8 +65,18 @@ var varPattern = regexp.MustCompile(`\{\{(.*?)\}\}`)
 // identPattern matches a valid Go-style identifier.
 var identPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// Options configures validation behaviour.
+type Options struct {
+	// SecurityStrict promotes all security-advisory warnings (v15–v20) to
+	// errors, causing validate to exit with a non-zero code. Intended for
+	// CI pipelines where any security advisory must be resolved before merge.
+	SecurityStrict bool
+}
+
 // Validate runs all validation rules against the AST and returns any issues found.
-func Validate(ast *rbast.RunbookAST) []ValidationError {
+// Security-advisory rules (v15–v20) produce warnings by default; pass
+// Options{SecurityStrict: true} to promote them to errors.
+func Validate(ast *rbast.RunbookAST, opts Options) []ValidationError {
 	var errs []ValidationError
 
 	errs = append(errs, v1UniqueNames(ast)...)
@@ -77,6 +91,14 @@ func Validate(ast *rbast.RunbookAST) []ValidationError {
 	errs = append(errs, v10RequiredTools(ast)...)
 	errs = append(errs, v11NonEmptyCommands(ast)...)
 	errs = append(errs, v12DuplicateYAMLKeys(ast)...)
+	errs = append(errs, v13DotEnvInGitignore(ast)...)
+	errs = append(errs, v14RunbookWritableByOthers(ast)...)
+	errs = append(errs, v15ProductionWithoutConfirm(ast, opts)...)
+	errs = append(errs, v16DestructiveWithoutRollback(ast, opts)...)
+	errs = append(errs, v17HardcodedSecrets(ast, opts)...)
+	errs = append(errs, v18CurlInsecure(ast, opts)...)
+	errs = append(errs, v19WgetInsecure(ast, opts)...)
+	errs = append(errs, v20PipeToShell(ast, opts)...)
 
 	return errs
 }
@@ -283,54 +305,119 @@ func v7TemplateVars(ast *rbast.RunbookAST) []ValidationError {
 	return errs
 }
 
-// v8RollbackCycles checks that rollback references do not create cycles.
-// A cycle would occur if step A's rollback references a rollback that itself
-// is associated with a step that rolls back to A's rollback, etc.
-// In practice this checks that no step's rollback name matches another step's
-// name that transitively rolls back to the first.
+// v8RollbackCycles detects circular dependencies in rollback blocks.
+// Three patterns are caught:
+//
+//  1. Self-reference: a rollback block's command mentions its own name as a
+//     standalone token (e.g. a script that re-invokes the same rollback).
+//  2. Mutual reference: rollback A mentions rollback B and B mentions A
+//     (or any longer cycle in the mention graph).
+//  3. Shared rollback: two steps reference the same rollback block, creating
+//     an ambiguous execution chain when either step fails.
 func v8RollbackCycles(ast *rbast.RunbookAST) []ValidationError {
-	// Build a mapping: step name -> rollback name
-	stepRollback := make(map[string]string)
-	stepLine := make(map[string]int)
-	for _, s := range ast.Steps {
-		if s.Rollback != "" {
-			stepRollback[s.Name] = s.Rollback
-			stepLine[s.Name] = s.Line
-		}
-	}
-
-	// Build a mapping: rollback name -> step name (which step uses this rollback)
-	rollbackToStep := make(map[string]string)
-	for _, s := range ast.Steps {
-		if s.Rollback != "" {
-			rollbackToStep[s.Rollback] = s.Name
-		}
-	}
-
-	// Check for cycles: follow the chain step -> rollback -> step-that-has-same-name -> rollback -> ...
 	var errs []ValidationError
-	for stepName, rbName := range stepRollback {
-		visited := map[string]bool{stepName: true}
-		current := rbName
-		for current != "" {
-			// Does any step have the same name as this rollback?
-			if nextStep, ok := rollbackToStep[current]; ok && nextStep != stepName {
-				if visited[nextStep] {
-					errs = append(errs, ValidationError{
-						Severity: Error,
-						Message:  fmt.Sprintf("rollback cycle detected involving step %q", stepName),
-						Line:     stepLine[stepName],
-					})
-					break
-				}
-				visited[nextStep] = true
-				current = stepRollback[nextStep]
-			} else {
-				break
+
+	// --- Case 1 & 2: command-body reference analysis ---
+	// Build a set of all rollback names and their source lines.
+	rbLine := make(map[string]int, len(ast.Rollbacks))
+	for _, rb := range ast.Rollbacks {
+		rbLine[rb.Name] = rb.Line
+	}
+
+	// Case 1: self-reference — command contains the block's own name.
+	for _, rb := range ast.Rollbacks {
+		if rollbackCommandMentions(rb.Command, rb.Name) {
+			errs = append(errs, ValidationError{
+				Severity: Error,
+				Message:  fmt.Sprintf("rollback %q references its own name in its command body (potential infinite loop)", rb.Name),
+				Line:     rb.Line,
+			})
+		}
+	}
+
+	// Build directed graph: edge A→B means rollback A's command mentions rollback B.
+	graph := make(map[string][]string, len(ast.Rollbacks))
+	for _, rb := range ast.Rollbacks {
+		for other := range rbLine {
+			if other != rb.Name && rollbackCommandMentions(rb.Command, other) {
+				graph[rb.Name] = append(graph[rb.Name], other)
 			}
 		}
 	}
+
+	// Case 2: cycle detection via DFS on the mention graph.
+	visited := make(map[string]bool)
+	onStack := make(map[string]bool)
+	reported := make(map[string]bool)
+
+	var dfs func(name string) bool
+	dfs = func(name string) bool {
+		if onStack[name] {
+			return true
+		}
+		if visited[name] {
+			return false
+		}
+		visited[name] = true
+		onStack[name] = true
+		for _, neighbor := range graph[name] {
+			if dfs(neighbor) {
+				return true
+			}
+		}
+		onStack[name] = false
+		return false
+	}
+
+	for _, rb := range ast.Rollbacks {
+		if !visited[rb.Name] && !reported[rb.Name] {
+			if dfs(rb.Name) && !reported[rb.Name] {
+				reported[rb.Name] = true
+				errs = append(errs, ValidationError{
+					Severity: Error,
+					Message:  fmt.Sprintf("rollback %q is part of a circular reference chain", rb.Name),
+					Line:     rb.Line,
+				})
+			}
+		}
+	}
+
+	// --- Case 3: shared rollback block ---
+	// Two or more steps reference the same rollback block; if either step fails
+	// the rollback runs in a context the other step may not expect.
+	rbUsers := make(map[string][]string) // rollback name -> step names that use it
+	for _, s := range ast.Steps {
+		if s.Rollback != "" {
+			rbUsers[s.Rollback] = append(rbUsers[s.Rollback], s.Name)
+		}
+	}
+	for rbName, users := range rbUsers {
+		if len(users) > 1 {
+			errs = append(errs, ValidationError{
+				Severity: Error,
+				Message: fmt.Sprintf(
+					"rollback %q is shared by multiple steps %v — each step should have its own rollback block to avoid circular rollback chains",
+					rbName, users,
+				),
+				Line: rbLine[rbName],
+			})
+		}
+	}
+
 	return errs
+}
+
+// rollbackCommandMentions reports whether cmd contains name as a standalone
+// shell token (i.e. not as a substring of a longer word).
+func rollbackCommandMentions(cmd, name string) bool {
+	for _, field := range strings.Fields(cmd) {
+		// Strip surrounding shell punctuation.
+		token := strings.Trim(field, `"';,|&()<>{}[]!`)
+		if token == name {
+			return true
+		}
+	}
+	return false
 }
 
 // v9DependsOnRefs warns if depends_on references a non-existent step.
@@ -491,4 +578,105 @@ func suggestName(target string, candidates map[string]bool) string {
 		}
 	}
 	return best
+}
+
+// v13DotEnvInGitignore warns when a .env file exists in the same directory
+// as the runbook file but ".env" does not appear in the nearest .gitignore.
+// This prevents secrets from being accidentally committed to version control.
+func v13DotEnvInGitignore(ast *rbast.RunbookAST) []ValidationError {
+	if ast.FilePath == "" {
+		return nil
+	}
+	runbookDir := filepath.Dir(ast.FilePath)
+
+	// Only warn if a .env file actually exists next to the runbook.
+	dotEnvPath := filepath.Join(runbookDir, ".env")
+	if _, err := os.Stat(dotEnvPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	// Walk up the directory tree to find the nearest .gitignore.
+	if dotEnvInGitignore(runbookDir) {
+		return nil
+	}
+
+	return []ValidationError{{
+		Severity: Warning,
+		Message:  ".env file exists but is not listed in .gitignore. Secrets may be committed to version control.",
+	}}
+}
+
+// dotEnvInGitignore walks up from dir until it finds a .gitignore that
+// contains a ".env" entry, or reaches the filesystem root. Returns true if
+// a covering .gitignore entry is found.
+func dotEnvInGitignore(dir string) bool {
+	current := dir
+	for {
+		gitignorePath := filepath.Join(current, ".gitignore")
+		if f, err := os.Open(gitignorePath); err == nil {
+			found := gitignoreContainsDotEnv(f)
+			f.Close()
+			if found {
+				return true
+			}
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without finding a covering entry.
+			return false
+		}
+		current = parent
+	}
+}
+
+// gitignoreContainsDotEnv reports whether the .gitignore content (read from r)
+// has a line that matches ".env" (exact or glob-style).
+func gitignoreContainsDotEnv(r *os.File) bool {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip blank lines and comments.
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Match ".env", "/.env", ".env*" and similar common patterns.
+		base := strings.TrimPrefix(line, "/")
+		if base == ".env" || strings.HasPrefix(base, ".env ") ||
+			base == ".env*" || strings.HasSuffix(base, "/.env") {
+			return true
+		}
+	}
+	return false
+}
+
+// v14RunbookWritableByOthers warns when the runbook file itself is writable
+// by group or other users on Unix systems. A world- or group-writable runbook
+// could be modified by an attacker to inject malicious commands.
+// This check is skipped on Windows where Unix permission bits do not apply.
+func v14RunbookWritableByOthers(ast *rbast.RunbookAST) []ValidationError {
+	if runtime.GOOS == "windows" || ast.FilePath == "" {
+		return nil
+	}
+
+	info, err := os.Stat(ast.FilePath)
+	if err != nil {
+		// File may not exist on disk during unit tests — skip silently.
+		return nil
+	}
+
+	perm := info.Mode().Perm()
+	// Check group-write (0o020) or others-write (0o002) bits.
+	if perm&0o022 == 0 {
+		return nil
+	}
+
+	name := filepath.Base(ast.FilePath)
+	return []ValidationError{{
+		Severity: Warning,
+		Message: fmt.Sprintf(
+			"⚠ %s is writable by other users. An attacker could modify it. Run: chmod 644 %s",
+			name, name,
+		),
+	}}
 }

@@ -16,26 +16,93 @@ package parser
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/runbookdev/runbook/internal/ast"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	// maxFileSizeBytes is the hard limit on .runbook file size (1 MB).
+	maxFileSizeBytes = 1 * 1024 * 1024
+
+	// maxFrontmatterBytes is the hard limit on frontmatter size (64 KB).
+	maxFrontmatterBytes = 64 * 1024
+
+	// maxBlocks is the maximum number of code blocks allowed in a single file.
+	maxBlocks = 1000
+
+	// maxLineLengthChars is the threshold above which a line triggers a warning.
+	maxLineLengthChars = 10_000
+)
+
 // attrPattern matches key="value" pairs on the block opening line.
 var attrPattern = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
+// ParseFile reads filePath from disk, enforces the 1 MB size limit before
+// reading, validates UTF-8, and delegates to Parse for content-level checks.
+func ParseFile(filePath string) (*ast.RunbookAST, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filePath, err)
+	}
+	if info.Size() > maxFileSizeBytes {
+		return nil, fmt.Errorf("%s: file exceeds maximum size of 1 MB", filePath)
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filePath, err)
+	}
+	return Parse(filePath, string(data))
+}
+
 // Parse parses a .runbook file and returns its AST.
+// It performs UTF-8 validation, frontmatter size enforcement, block count
+// limiting, strict YAML parsing, and line-length warnings.
 func Parse(filePath, content string) (*ast.RunbookAST, error) {
+	// File size guard (catches content passed directly without going through
+	// ParseFile, e.g. in tests or when content is generated in-memory).
+	if len(content) > maxFileSizeBytes {
+		return nil, fmt.Errorf("%s: file exceeds maximum size of 1 MB", filePath)
+	}
+
+	// UTF-8 validation: reject binary or mis-encoded files early.
+	if !utf8.Valid([]byte(content)) {
+		return nil, fmt.Errorf("%s: file contains invalid UTF-8", filePath)
+	}
+
+	// Scan for suspiciously long lines (warn only; do not reject).
+	var warnings []string
+	for lineNum, line := range strings.Split(content, "\n") {
+		if len(line) > maxLineLengthChars {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s:%d: line exceeds 10,000 characters (possible binary file)", filePath, lineNum+1,
+			))
+		}
+	}
+
 	meta, body, err := extractFrontmatter(content)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filePath, err)
 	}
 
+	// Frontmatter size limit: guard against YAML payloads designed to consume
+	// large amounts of memory during unmarshalling.
+	if len(meta) > maxFrontmatterBytes {
+		return nil, fmt.Errorf("%s: frontmatter exceeds maximum size of 64 KB", filePath)
+	}
+
 	var metadata ast.Metadata
 	if meta != "" {
-		if err := yaml.Unmarshal([]byte(meta), &metadata); err != nil {
+		// KnownFields(true) rejects unknown YAML keys, preventing YAML bombs
+		// delivered via maliciously crafted anchor/alias chains and catching
+		// accidental typos in field names.
+		dec := yaml.NewDecoder(strings.NewReader(meta))
+		dec.KnownFields(true)
+		if err := dec.Decode(&metadata); err != nil {
 			return nil, fmt.Errorf("%s: invalid frontmatter YAML: %w", filePath, err)
 		}
 	}
@@ -44,6 +111,7 @@ func Parse(filePath, content string) (*ast.RunbookAST, error) {
 		Metadata:       metadata,
 		FilePath:       filePath,
 		RawFrontmatter: meta,
+		ParseWarnings:  warnings,
 	}
 
 	if err := extractBlocks(filePath, body, tree); err != nil {
@@ -86,11 +154,13 @@ func extractFrontmatter(content string) (frontmatter, body string, err error) {
 	return frontmatter, body, nil
 }
 
-// extractBlocks finds all typed fenced code blocks in the body and populates the AST.
+// extractBlocks finds all typed fenced code blocks in the body and populates
+// the AST. It enforces the 1 000-block limit and correctly handles triple
+// backticks that appear inside a block body: only a line whose trimmed content
+// is exactly "```" closes the current block.
 func extractBlocks(filePath, body string, tree *ast.RunbookAST) error {
 	lines := strings.Split(body, "\n")
-	// Calculate the line offset for the body within the full file.
-	// The body starts after frontmatter, so we count frontmatter lines.
+	blockCount := 0
 	i := 0
 	for i < len(lines) {
 		line := lines[i]
@@ -102,9 +172,16 @@ func extractBlocks(filePath, body string, tree *ast.RunbookAST) error {
 			continue
 		}
 
-		openLine := i + 1 // 1-based line within body (approximate; adjusted by caller context)
+		blockCount++
+		if blockCount > maxBlocks {
+			return fmt.Errorf("%s: file contains more than 1000 blocks (limit: 1000)", filePath)
+		}
 
-		// Collect block content until closing ```
+		openLine := i + 1 // 1-based line within body (approximate)
+
+		// Collect block content until a line whose trimmed value is exactly
+		// "```". Lines that contain triple backticks but also have other content
+		// (e.g. "```bash" or "echo '```'") are included in the command body.
 		i++
 		blockLines := make([]string, 0, 16)
 		closed := false
@@ -246,6 +323,8 @@ func applyStepMeta(node *ast.StepNode, meta string) {
 		switch key {
 		case "timeout":
 			node.Timeout = value
+		case "kill_grace":
+			node.KillGrace = value
 		case "confirm":
 			node.Confirm = value
 		case "env":

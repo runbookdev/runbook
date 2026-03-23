@@ -15,13 +15,21 @@
 package resolver
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	rbast "github.com/runbookdev/runbook/internal/ast"
 )
+
+// noopOpts returns an Options that suppresses I/O for tests that don't care
+// about metacharacter scanning output.
+func noopOpts() Options {
+	return Options{NonInteractive: true, Stderr: os.Stderr}
+}
 
 func TestResolvePriorityOrder(t *testing.T) {
 	// Set up .env file with lowest-priority value.
@@ -43,7 +51,7 @@ func TestResolvePriorityOrder(t *testing.T) {
 
 	// CLI flags should win over env and dotenv.
 	cliVars := map[string]string{"region": "from-cli"}
-	if err := Resolve(ast, "production", cliVars, envFile); err != nil {
+	if err := Resolve(ast, "production", cliVars, envFile, noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "deploy --region=from-cli" {
@@ -70,7 +78,7 @@ func TestResolveEnvVarOverridesDotEnv(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "production", nil, envFile); err != nil {
+	if err := Resolve(ast, "production", nil, envFile, noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "deploy --region=from-env" {
@@ -87,7 +95,7 @@ func TestResolveBuiltins(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "staging", nil, ""); err != nil {
+	if err := Resolve(ast, "staging", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "echo my-runbook 2.0 staging" {
@@ -104,7 +112,7 @@ func TestResolveBuiltinUser(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Should be non-empty (resolved to current user).
@@ -122,7 +130,7 @@ func TestResolveBuiltinHostname(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(ast.Steps[0].Command, "{{hostname}}") {
@@ -139,7 +147,7 @@ func TestResolveBuiltinCwd(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(ast.Steps[0].Command, "{{cwd}}") {
@@ -156,7 +164,7 @@ func TestResolveBuiltinRunID(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(ast.Steps[0].Command, "{{run_id}}") {
@@ -173,7 +181,7 @@ func TestResolveBuiltinTimestamp(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(ast.Steps[0].Command, "{{timestamp}}") {
@@ -190,7 +198,7 @@ func TestResolveUnresolvedVariable(t *testing.T) {
 		},
 	}
 
-	err := Resolve(ast, "production", nil, "")
+	err := Resolve(ast, "production", nil, "", noopOpts())
 	if err == nil {
 		t.Fatal("expected error for unresolved variable")
 	}
@@ -212,7 +220,7 @@ func TestResolveEnvFiltering(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "staging", nil, ""); err != nil {
+	if err := Resolve(ast, "staging", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -250,7 +258,7 @@ DB_NAME=mydb
 		},
 	}
 
-	if err := Resolve(ast, "", nil, envFile); err != nil {
+	if err := Resolve(ast, "", nil, envFile, noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "psql -h localhost -p 5432 mydb" {
@@ -276,7 +284,7 @@ func TestResolveAllBlockTypes(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "staging", nil, ""); err != nil {
+	if err := Resolve(ast, "staging", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -313,7 +321,7 @@ func TestResolveMultipleVariablesInOneCommand(t *testing.T) {
 	}
 
 	cliVars := map[string]string{"app": "myapp", "region": "us-east-1"}
-	if err := Resolve(ast, "production", cliVars, ""); err != nil {
+	if err := Resolve(ast, "production", cliVars, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "deploy myapp to us-east-1 in production" {
@@ -330,7 +338,7 @@ func TestResolveNoVariables(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if ast.Steps[0].Command != "echo hello" {
@@ -347,7 +355,7 @@ func TestResolveEnvFilteringCaseInsensitive(t *testing.T) {
 		},
 	}
 
-	if err := Resolve(ast, "production", nil, ""); err != nil {
+	if err := Resolve(ast, "production", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(ast.Steps) != 1 {
@@ -358,7 +366,7 @@ func TestResolveEnvFilteringCaseInsensitive(t *testing.T) {
 func TestResolveInvalidEnvFile(t *testing.T) {
 	err := Resolve(
 		&rbast.RunbookAST{FilePath: "test.runbook", Metadata: rbast.Metadata{Name: "test"}},
-		"", nil, "/nonexistent/.env",
+		"", nil, "/nonexistent/.env", noopOpts(),
 	)
 	if err == nil {
 		t.Fatal("expected error for invalid env file path")
@@ -433,10 +441,104 @@ func TestResolveEmptyTargetEnv(t *testing.T) {
 	}
 
 	// With empty target env, no filtering should happen.
-	if err := Resolve(ast, "", nil, ""); err != nil {
+	if err := Resolve(ast, "", nil, "", noopOpts()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(ast.Steps) != 2 {
 		t.Errorf("expected 2 steps (no filtering), got %d", len(ast.Steps))
+	}
+}
+
+// --- .env permission warning tests ---
+
+func TestWarnDotEnvPermissions_WarnsWhenTooPermissive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("SECRET=abc\n"), 0o644); err != nil { //nolint:gosec // intentionally permissive for permission-warning test
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	warnDotEnvPermissions(envFile, &buf)
+
+	out := buf.String()
+	if !strings.Contains(out, "0644") {
+		t.Errorf("expected permission 0644 in warning, got %q", out)
+	}
+	if !strings.Contains(out, "chmod 600") {
+		t.Errorf("expected chmod 600 suggestion, got %q", out)
+	}
+}
+
+func TestWarnDotEnvPermissions_SilentWhenCorrectPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("SECRET=abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	warnDotEnvPermissions(envFile, &buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no warning for 0600 .env file, got %q", buf.String())
+	}
+}
+
+func TestResolve_DotEnvPermissionWarningEmittedToStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	// Write .env with world-readable permissions.
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("region=us-east-1\n"), 0o644); err != nil { //nolint:gosec // intentionally permissive for permission-warning test
+		t.Fatal(err)
+	}
+
+	ast := minimalAST()
+	var stderr bytes.Buffer
+	opts := Options{NonInteractive: true, Stderr: &stderr}
+
+	if err := Resolve(ast, "", nil, envFile, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "chmod 600") {
+		t.Errorf("expected .env permission warning in stderr, got %q", stderr.String())
+	}
+}
+
+func TestResolve_DotEnvNoWarningForSecurePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("region=us-east-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ast := minimalAST()
+	var stderr bytes.Buffer
+	opts := Options{NonInteractive: true, Stderr: &stderr}
+
+	if err := Resolve(ast, "", nil, envFile, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if strings.Contains(stderr.String(), "chmod 600") {
+		t.Errorf("unexpected permission warning for secure .env, got %q", stderr.String())
+	}
+}
+
+// minimalAST returns a bare-minimum AST with no template variables.
+func minimalAST() *rbast.RunbookAST {
+	return &rbast.RunbookAST{
+		FilePath: "test.runbook",
+		Metadata: rbast.Metadata{Name: "test", Version: "1.0"},
+		Steps:    []rbast.StepNode{{Name: "step1", Command: "echo hello", Line: 10}},
 	}
 }

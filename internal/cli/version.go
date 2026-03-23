@@ -16,6 +16,8 @@ package cli
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -23,12 +25,21 @@ import (
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print version, commit, and build date",
+		Short: "Print version, commit, build date, Go version, and platform",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("runbook %s\n", Version)
-			fmt.Printf("  commit: %s\n", Commit)
-			fmt.Printf("  built:  %s\n", Date)
+			fmt.Printf("runbook %s (commit: %s)\n", displayVersion(Version), Commit)
+			fmt.Printf("Built:    %s\n", Date)
+			fmt.Printf("Go:       %s\n", runtime.Version())
+			fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		},
 	}
+}
+
+// displayVersion prefixes the version with "v" if it doesn't already have one.
+func displayVersion(v string) string {
+	if v == "dev" || strings.HasPrefix(v, "v") {
+		return v
+	}
+	return "v" + v
 }

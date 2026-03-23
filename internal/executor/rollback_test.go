@@ -19,6 +19,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestExecutor(t *testing.T) (*StepExecutor, *bytes.Buffer, *bytes.Buffer) {
@@ -59,7 +60,7 @@ func TestRollbackEngine_Step3Of5Fails(t *testing.T) {
 	var failedStep string
 
 	for _, s := range steps {
-		result, err := exec.Run(ctx, s.name, s.command, 0)
+		result, err := exec.Run(ctx, s.name, s.command, 0, 0)
 		if err != nil {
 			t.Fatalf("unexpected error running %q: %v", s.name, err)
 		}
@@ -293,5 +294,111 @@ func TestRollbackEngine_RollbackOutputStreamed(t *testing.T) {
 	// The rollback command's stdout should be streamed with a prefix.
 	if !strings.Contains(stdout.String(), "[rollback:rb-verify] | rollback-output-check") {
 		t.Errorf("expected prefixed rollback output, got %q", stdout.String())
+	}
+}
+
+func TestRollbackEngine_OutputCapturedInEntry(t *testing.T) {
+	exec, _, _ := newTestExecutor(t)
+	engine := NewRollbackEngine(exec)
+	engine.Output = &bytes.Buffer{}
+
+	engine.Push("rb-out", "echo hello-from-rollback; echo error-line >&2")
+	report := engine.Execute(context.Background(), "step_failure")
+
+	if len(report.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(report.Entries))
+	}
+	e := report.Entries[0]
+	if !strings.Contains(e.Stdout, "hello-from-rollback") {
+		t.Errorf("stdout not captured in entry: %q", e.Stdout)
+	}
+	if e.Status != RollbackSuccess {
+		t.Errorf("expected success, got %s", e.Status)
+	}
+	if e.StartedAt.IsZero() || e.FinishedAt.IsZero() {
+		t.Error("StartedAt/FinishedAt not set in entry")
+	}
+}
+
+func TestRollbackEngine_TriggerStepAndDuration(t *testing.T) {
+	exec, _, _ := newTestExecutor(t)
+	engine := NewRollbackEngine(exec)
+	engine.Output = &bytes.Buffer{}
+
+	engine.Push("rb-one", "echo one")
+	report := engine.Execute(context.Background(), "step_failure")
+	report.TriggerStep = "deploy" // set by caller in run.go
+
+	if report.TriggerStep != "deploy" {
+		t.Errorf("expected TriggerStep 'deploy', got %q", report.TriggerStep)
+	}
+	if report.TotalDuration <= 0 {
+		t.Errorf("expected positive TotalDuration, got %s", report.TotalDuration)
+	}
+}
+
+func TestRollbackEngine_TimedOutBlockContinues(t *testing.T) {
+	exec, _, _ := newTestExecutor(t)
+	engine := NewRollbackEngine(exec)
+	engine.Output = &bytes.Buffer{}
+
+	// First block sleeps longer than the rollback timeout.
+	// We override defaultRollbackTimeout by using a context with a very short deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Two blocks: the context will expire after the first one starts, so at least
+	// one will appear as a context-cancelled non-success result.
+	engine.Push("rb-ok", "echo done")
+	engine.Push("rb-slow", "sleep 10") // will be killed by short context
+
+	report := engine.Execute(ctx, "step_failure")
+
+	// Both entries should be present — failed block doesn't abort the loop.
+	if len(report.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(report.Entries))
+	}
+	// The slow block runs first (LIFO) and should not have succeeded.
+	if report.Entries[0].Name != "rb-slow" {
+		t.Errorf("expected rb-slow first (LIFO), got %q", report.Entries[0].Name)
+	}
+	if report.Entries[0].Status == RollbackSuccess {
+		t.Error("expected rb-slow to fail or time out, got success")
+	}
+}
+
+func TestRollbackEngine_Plan(t *testing.T) {
+	exec, _, _ := newTestExecutor(t)
+	engine := NewRollbackEngine(exec)
+
+	// Empty plan.
+	if plan := engine.Plan(); len(plan) != 0 {
+		t.Errorf("expected empty plan, got %v", plan)
+	}
+
+	// Push in order: first, second, third.
+	engine.Push("rb-first", "echo first")
+	engine.Push("rb-second", "echo second")
+	engine.Push("rb-third", "echo third")
+
+	plan := engine.Plan()
+	if len(plan) != 3 {
+		t.Fatalf("expected 3 plan entries, got %d", len(plan))
+	}
+	// Plan should be LIFO order (same as execution order).
+	if plan[0].Name != "rb-third" {
+		t.Errorf("expected rb-third first in plan, got %q", plan[0].Name)
+	}
+	if plan[1].Name != "rb-second" {
+		t.Errorf("expected rb-second second in plan, got %q", plan[1].Name)
+	}
+	if plan[2].Name != "rb-first" {
+		t.Errorf("expected rb-first third in plan, got %q", plan[2].Name)
+	}
+
+	// Plan must not affect the stack — Execute should still work normally.
+	report := engine.Execute(context.Background(), "step_failure")
+	if report.Succeeded != 3 {
+		t.Errorf("expected 3 succeeded after Plan(), got %d", report.Succeeded)
 	}
 }

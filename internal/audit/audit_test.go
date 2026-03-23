@@ -16,7 +16,11 @@ package audit
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -491,5 +495,362 @@ func TestDefaultDBPath(t *testing.T) {
 	}
 	if filepath.Base(path) != "runbook.db" {
 		t.Errorf("expected runbook.db, got %q", filepath.Base(path))
+	}
+}
+
+// --- Permission warning tests ---
+
+func TestOpen_NewDBFileGetsSecurePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	dbPath := filepath.Join(t.TempDir(), "new.db")
+	l, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("expected new DB file to have mode 0600, got %04o", got)
+	}
+	// No warnings should be emitted for a new file that was just secured.
+	for _, w := range l.Warnings {
+		if strings.Contains(w, "audit database") {
+			t.Errorf("unexpected DB permission warning for new file: %s", w)
+		}
+	}
+}
+
+func TestOpen_ExistingDBWithWidePermsProducesWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "audit.db")
+
+	// First open creates the file and secures it to 0600.
+	l, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	l.Close()
+
+	// Widen the permissions to simulate a misconfigured file.
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	// Second open should detect and warn about the wrong permissions.
+	l2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer l2.Close()
+
+	var found bool
+	for _, w := range l2.Warnings {
+		if strings.Contains(w, "audit database") && strings.Contains(w, "chmod 600") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected DB permission warning, got warnings: %v", l2.Warnings)
+	}
+}
+
+func TestOpen_ExistingDirWithWidePermsProducesWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	// Create the audit directory first with too-open permissions.
+	dir := filepath.Join(t.TempDir(), "audit")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	dbPath := filepath.Join(dir, "runbook.db")
+	l, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	var found bool
+	for _, w := range l.Warnings {
+		if strings.Contains(w, "audit directory") && strings.Contains(w, "chmod 700") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected directory permission warning, got warnings: %v", l.Warnings)
+	}
+}
+
+func TestOpen_NewDirHasNoWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	// Let Open create a brand-new directory — it should use 0700 and not warn.
+	dbPath := filepath.Join(t.TempDir(), "fresh", "runbook.db")
+	l, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	for _, w := range l.Warnings {
+		if strings.Contains(w, "audit directory") {
+			t.Errorf("unexpected dir permission warning for new dir: %s", w)
+		}
+	}
+}
+
+// --- Hardening tests ---
+
+// TestLogStep_SecretRedactedInStdoutStderr verifies that secret values embedded
+// in stdout and stderr are replaced with [REDACTED] before storage.
+func TestLogStep_SecretRedactedInStdoutStderr(t *testing.T) {
+	l := openTestDB(t)
+	now := time.Now().UTC()
+
+	_ = l.StartRun(RunRecord{
+		ID: "run-redact", Runbook: "test.runbook", Name: "Test", StartedAt: now,
+	})
+
+	secrets := map[string]string{
+		"DB_PASSWORD": "s3cr3tP@ss",
+		"API_TOKEN":   "tok-abc123",
+	}
+
+	err := l.LogStep(StepLog{
+		RunID:      "run-redact",
+		StepName:   "deploy",
+		BlockType:  "step",
+		StartedAt:  now,
+		FinishedAt: now.Add(time.Second),
+		Status:     "success",
+		Stdout:     "connected with password s3cr3tP@ss to db",
+		Stderr:     "warning: token tok-abc123 expires soon",
+		Command:    "deploy --pass=s3cr3tP@ss",
+		Secrets:    secrets,
+	})
+	if err != nil {
+		t.Fatalf("LogStep: %v", err)
+	}
+
+	_, steps, err := l.GetRun("run-redact")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+
+	s := steps[0]
+	if strings.Contains(s.Stdout, "s3cr3tP@ss") {
+		t.Errorf("stdout still contains secret: %q", s.Stdout)
+	}
+	if strings.Contains(s.Stderr, "tok-abc123") {
+		t.Errorf("stderr still contains secret: %q", s.Stderr)
+	}
+	if strings.Contains(s.Command, "s3cr3tP@ss") {
+		t.Errorf("command still contains secret: %q", s.Command)
+	}
+	if !strings.Contains(s.Stdout, redactedValue) {
+		t.Errorf("stdout missing %s: %q", redactedValue, s.Stdout)
+	}
+	if !strings.Contains(s.Stderr, redactedValue) {
+		t.Errorf("stderr missing %s: %q", redactedValue, s.Stderr)
+	}
+}
+
+// TestLogStep_OutputTruncatedAt1MB verifies that stdout/stderr exceeding 1 MB
+// is cut to exactly maxOutputBytes and suffixed with the truncation marker.
+func TestLogStep_OutputTruncatedAt1MB(t *testing.T) {
+	l := openTestDB(t)
+	now := time.Now().UTC()
+
+	_ = l.StartRun(RunRecord{
+		ID: "run-trunc", Runbook: "test.runbook", Name: "Test", StartedAt: now,
+	})
+
+	// Build a string that is clearly larger than 1 MB.
+	bigOutput := strings.Repeat("x", maxOutputBytes+512)
+
+	err := l.LogStep(StepLog{
+		RunID:      "run-trunc",
+		StepName:   "bigstep",
+		BlockType:  "step",
+		StartedAt:  now,
+		FinishedAt: now.Add(time.Second),
+		Status:     "success",
+		Stdout:     bigOutput,
+		Stderr:     bigOutput,
+	})
+	if err != nil {
+		t.Fatalf("LogStep: %v", err)
+	}
+
+	_, steps, err := l.GetRun("run-trunc")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+
+	s := steps[0]
+	wantLen := maxOutputBytes + len(outputTruncatedMarker)
+	if len(s.Stdout) != wantLen {
+		t.Errorf("stdout: expected len %d, got %d", wantLen, len(s.Stdout))
+	}
+	if !strings.HasSuffix(s.Stdout, outputTruncatedMarker) {
+		t.Errorf("stdout missing truncation marker, got suffix: %q", s.Stdout[len(s.Stdout)-40:])
+	}
+	if len(s.Stderr) != wantLen {
+		t.Errorf("stderr: expected len %d, got %d", wantLen, len(s.Stderr))
+	}
+	if !strings.HasSuffix(s.Stderr, outputTruncatedMarker) {
+		t.Errorf("stderr missing truncation marker")
+	}
+}
+
+// TestLogStep_OutputUnderLimitNotTruncated confirms that outputs smaller than
+// 1 MB pass through unchanged and carry no truncation marker.
+func TestLogStep_OutputUnderLimitNotTruncated(t *testing.T) {
+	l := openTestDB(t)
+	now := time.Now().UTC()
+
+	_ = l.StartRun(RunRecord{
+		ID: "run-notrunc", Runbook: "test.runbook", Name: "Test", StartedAt: now,
+	})
+
+	small := "just a small output"
+	_ = l.LogStep(StepLog{
+		RunID:      "run-notrunc",
+		StepName:   "s",
+		BlockType:  "step",
+		StartedAt:  now,
+		FinishedAt: now.Add(time.Second),
+		Status:     "success",
+		Stdout:     small,
+	})
+
+	_, steps, _ := l.GetRun("run-notrunc")
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step")
+	}
+	if steps[0].Stdout != small {
+		t.Errorf("expected stdout %q, got %q", small, steps[0].Stdout)
+	}
+	if strings.Contains(steps[0].Stdout, outputTruncatedMarker) {
+		t.Errorf("unexpected truncation marker in small output")
+	}
+}
+
+// TestStartRun_SQLInjectionSafe verifies that a malicious runbook name
+// containing SQL metacharacters does not corrupt the database.
+func TestStartRun_SQLInjectionSafe(t *testing.T) {
+	l := openTestDB(t)
+	now := time.Now().UTC()
+
+	maliciousName := `'; DROP TABLE runs; --`
+	err := l.StartRun(RunRecord{
+		ID:        "run-sqlinject",
+		Runbook:   "attack.runbook",
+		Name:      maliciousName,
+		StartedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("StartRun with SQL injection name: %v", err)
+	}
+
+	// The runs table must still exist and the record must be retrievable.
+	run, _, err := l.GetRun("run-sqlinject")
+	if err != nil {
+		t.Fatalf("GetRun after SQL injection attempt: %v", err)
+	}
+	if run.Name != maliciousName {
+		t.Errorf("expected name %q stored verbatim, got %q", maliciousName, run.Name)
+	}
+
+	// Confirm the runs table still works by inserting a normal record.
+	err = l.StartRun(RunRecord{
+		ID:        "run-after-inject",
+		Runbook:   "normal.runbook",
+		Name:      "Normal Run",
+		StartedAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("StartRun after SQL injection: %v", err)
+	}
+}
+
+// TestConcurrentWrites verifies that two goroutines can write step logs
+// simultaneously without error, exercising WAL mode's concurrent-write safety.
+func TestConcurrentWrites(t *testing.T) {
+	// Use a single shared DB file so both writers hit the same SQLite instance.
+	dbPath := filepath.Join(t.TempDir(), "concurrent.db")
+	l, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	now := time.Now().UTC()
+	for _, id := range []string{"run-a", "run-b"} {
+		if err := l.StartRun(RunRecord{
+			ID: id, Runbook: "test.runbook", Name: "Test", StartedAt: now,
+		}); err != nil {
+			t.Fatalf("StartRun %s: %v", id, err)
+		}
+	}
+
+	const writesPerGoroutine = 20
+	var wg sync.WaitGroup
+	errc := make(chan error, 2*writesPerGoroutine)
+
+	for _, runID := range []string{"run-a", "run-b"} {
+		runID := runID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range writesPerGoroutine {
+				err := l.LogStep(StepLog{
+					RunID:      runID,
+					StepName:   fmt.Sprintf("step-%d", i),
+					BlockType:  "step",
+					StartedAt:  now.Add(time.Duration(i) * time.Millisecond),
+					FinishedAt: now.Add(time.Duration(i+1) * time.Millisecond),
+					Status:     "success",
+				})
+				if err != nil {
+					errc <- fmt.Errorf("%s step %d: %w", runID, i, err)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errc)
+
+	for err := range errc {
+		t.Errorf("concurrent write error: %v", err)
+	}
+
+	// Both runs should have all their steps.
+	for _, runID := range []string{"run-a", "run-b"} {
+		_, steps, err := l.GetRun(runID)
+		if err != nil {
+			t.Fatalf("GetRun %s: %v", runID, err)
+		}
+		if len(steps) != writesPerGoroutine {
+			t.Errorf("%s: expected %d steps, got %d", runID, writesPerGoroutine, len(steps))
+		}
 	}
 }

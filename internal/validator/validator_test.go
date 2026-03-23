@@ -16,6 +16,9 @@ package validator
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -405,31 +408,101 @@ func TestV8_RollbackCycles(t *testing.T) {
 		name    string
 		ast     *rbast.RunbookAST
 		wantErr bool
+		substr  string
 	}{
+		// ── Clean cases ────────────────────────────────────────────────────────
 		{
-			name: "no cycle",
+			name: "no cycle — each step has its own rollback",
 			ast: &rbast.RunbookAST{
-				Metadata:  rbast.Metadata{Name: "Test"},
-				Steps:     []rbast.StepNode{{Name: "deploy", Command: "echo", Rollback: "undo", Line: 10}},
-				Rollbacks: []rbast.RollbackNode{{Name: "undo", Command: "echo", Line: 15}},
+				Metadata: rbast.Metadata{Name: "Test"},
+				Steps: []rbast.StepNode{
+					{Name: "migrate", Command: "echo migrate", Rollback: "undo-migrate", Line: 10},
+					{Name: "deploy", Command: "echo deploy", Rollback: "undo-deploy", Line: 11},
+				},
+				Rollbacks: []rbast.RollbackNode{
+					{Name: "undo-migrate", Command: "echo rolling back migrate", Line: 20},
+					{Name: "undo-deploy", Command: "echo rolling back deploy", Line: 21},
+				},
 			},
 			wantErr: false,
 		},
 		{
-			name:    "no rollback refs",
+			name:    "no rollback refs at all",
 			ast:     validAST(),
 			wantErr: false,
+		},
+		{
+			// Command mentions an unrelated word that happens to share a prefix.
+			name: "command contains name as substring — no false positive",
+			ast: &rbast.RunbookAST{
+				Metadata:  rbast.Metadata{Name: "Test"},
+				Steps:     []rbast.StepNode{{Name: "deploy", Command: "echo deploy", Rollback: "undo", Line: 10}},
+				Rollbacks: []rbast.RollbackNode{{Name: "undo", Command: "echo undo-extra-suffix", Line: 20}},
+			},
+			wantErr: false,
+		},
+
+		// ── Case 1: self-reference in command body ──────────────────────────
+		{
+			name: "rollback block references its own name",
+			ast: &rbast.RunbookAST{
+				Metadata:  rbast.Metadata{Name: "Test"},
+				Steps:     []rbast.StepNode{{Name: "deploy", Command: "echo deploy", Rollback: "undo-deploy", Line: 10}},
+				Rollbacks: []rbast.RollbackNode{{Name: "undo-deploy", Command: "runbook run undo-deploy", Line: 20}},
+			},
+			wantErr: true,
+			substr:  "references its own name",
+		},
+
+		// ── Case 2: two rollback blocks referencing each other ──────────────
+		{
+			name: "two rollback blocks reference each other",
+			ast: &rbast.RunbookAST{
+				Metadata: rbast.Metadata{Name: "Test"},
+				Steps: []rbast.StepNode{
+					{Name: "step-a", Command: "echo a", Rollback: "rb-a", Line: 10},
+					{Name: "step-b", Command: "echo b", Rollback: "rb-b", Line: 11},
+				},
+				Rollbacks: []rbast.RollbackNode{
+					{Name: "rb-a", Command: "echo rolling back; rb-b", Line: 20},
+					{Name: "rb-b", Command: "echo rolling back; rb-a", Line: 21},
+				},
+			},
+			wantErr: true,
+			substr:  "circular reference chain",
+		},
+
+		// ── Case 3: two steps share the same rollback block ─────────────────
+		{
+			name: "step whose rollback is shared with another step",
+			ast: &rbast.RunbookAST{
+				Metadata: rbast.Metadata{Name: "Test"},
+				Steps: []rbast.StepNode{
+					{Name: "step-a", Command: "echo a", Rollback: "shared-rollback", Line: 10},
+					{Name: "step-b", Command: "echo b", Rollback: "shared-rollback", Line: 11},
+				},
+				Rollbacks: []rbast.RollbackNode{
+					{Name: "shared-rollback", Command: "echo shared", Line: 20},
+				},
+			},
+			wantErr: true,
+			substr:  "shared by multiple steps",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			errs := v8RollbackCycles(tt.ast)
-			if tt.wantErr && len(errs) == 0 {
-				t.Fatal("expected error, got none")
-			}
-			if !tt.wantErr && len(errs) > 0 {
-				t.Errorf("expected no errors, got %v", errs)
+			errors := errorsWithSeverity(errs, Error)
+			if tt.wantErr {
+				if len(errors) == 0 {
+					t.Fatal("expected error, got none")
+				}
+				if tt.substr != "" && !containsMessage(errors, tt.substr) {
+					t.Errorf("expected error containing %q, got: %v", tt.substr, errors)
+				}
+			} else if len(errors) > 0 {
+				t.Errorf("expected no errors, got %v", errors)
 			}
 		})
 	}
@@ -707,7 +780,7 @@ func TestValidate_ValidAST(t *testing.T) {
 		RawFrontmatter: "name: Deploy Service\nversion: 1.0.0\nenvironments: [staging, production]\n",
 	}
 
-	errs := Validate(ast)
+	errs := Validate(ast, Options{})
 	errors := errorsWithSeverity(errs, Error)
 	if len(errors) > 0 {
 		t.Errorf("expected no errors on valid AST, got %v", errors)
@@ -727,7 +800,7 @@ func TestValidate_MultipleIssues(t *testing.T) {
 		RawFrontmatter: "environments: [staging]\n",
 	}
 
-	errs := Validate(ast)
+	errs := Validate(ast, Options{})
 	errors := errorsWithSeverity(errs, Error)
 	warnings := errorsWithSeverity(errs, Warning)
 
@@ -807,5 +880,191 @@ func TestValidationError_String(t *testing.T) {
 				t.Errorf("Error() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- V13: .env in .gitignore ---
+
+func TestV13_DotEnvMissingFromGitignore(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a .env file next to the runbook.
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No .gitignore exists anywhere up the temp tree.
+	rbPath := filepath.Join(dir, "deploy.runbook")
+	ast := validAST()
+	ast.FilePath = rbPath
+
+	errs := v13DotEnvInGitignore(ast)
+	if !containsMessage(errs, ".gitignore") {
+		t.Errorf("expected .gitignore warning, got %v", errs)
+	}
+	if len(errorsWithSeverity(errs, Warning)) == 0 {
+		t.Error("expected Warning severity")
+	}
+}
+
+func TestV13_DotEnvListedInGitignore(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = filepath.Join(dir, "deploy.runbook")
+
+	errs := v13DotEnvInGitignore(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning when .env is in .gitignore, got %v", errs)
+	}
+}
+
+func TestV13_DotEnvListedInParentGitignore(t *testing.T) {
+	parent := t.TempDir()
+	child := filepath.Join(parent, "ops")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// .gitignore lives in parent, .env and runbook live in child.
+	if err := os.WriteFile(filepath.Join(parent, ".gitignore"), []byte(".env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, ".env"), []byte("SECRET=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = filepath.Join(child, "deploy.runbook")
+
+	errs := v13DotEnvInGitignore(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning when .env is in a parent .gitignore, got %v", errs)
+	}
+}
+
+func TestV13_NoDotEnvFileNoWarning(t *testing.T) {
+	dir := t.TempDir()
+	// No .env file — rule must stay silent regardless of .gitignore state.
+	ast := validAST()
+	ast.FilePath = filepath.Join(dir, "deploy.runbook")
+
+	errs := v13DotEnvInGitignore(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning when .env absent, got %v", errs)
+	}
+}
+
+func TestV13_GitignoreWithSlashPrefixPattern(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Gitignore uses "/.env" (root-anchored) — should still be recognized.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("/.env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = filepath.Join(dir, "deploy.runbook")
+
+	errs := v13DotEnvInGitignore(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning for '/.env' pattern, got %v", errs)
+	}
+}
+
+// --- V14: runbook writable by others ---
+
+func TestV14_RunbookWritableByGroupWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	dir := t.TempDir()
+	rbPath := filepath.Join(dir, "deploy.runbook")
+	if err := os.WriteFile(rbPath, []byte("---\nname: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Use Chmod to bypass umask and set the exact permission bits.
+	if err := os.Chmod(rbPath, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = rbPath
+
+	errs := v14RunbookWritableByOthers(ast)
+	if !containsMessage(errs, "writable by other users") {
+		t.Errorf("expected writable-by-others warning, got %v", errs)
+	}
+	if !containsMessage(errs, "chmod 644") {
+		t.Errorf("expected chmod 644 suggestion, got %v", errs)
+	}
+	if len(errorsWithSeverity(errs, Warning)) == 0 {
+		t.Error("expected Warning severity")
+	}
+}
+
+func TestV14_RunbookWritableByOthersWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	dir := t.TempDir()
+	rbPath := filepath.Join(dir, "deploy.runbook")
+	if err := os.WriteFile(rbPath, []byte("---\nname: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Use Chmod to bypass umask and set the exact permission bits.
+	if err := os.Chmod(rbPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = rbPath
+
+	errs := v14RunbookWritableByOthers(ast)
+	if !containsMessage(errs, "writable by other users") {
+		t.Errorf("expected writable-by-others warning, got %v", errs)
+	}
+}
+
+func TestV14_RunbookOwnerOnlyNoWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not applicable on Windows")
+	}
+	dir := t.TempDir()
+	rbPath := filepath.Join(dir, "deploy.runbook")
+	if err := os.WriteFile(rbPath, []byte("---\nname: test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ast := validAST()
+	ast.FilePath = rbPath
+
+	errs := v14RunbookWritableByOthers(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning for 0644 runbook, got %v", errs)
+	}
+}
+
+func TestV14_MissingFileNoWarning(t *testing.T) {
+	// FilePath points to a non-existent file — rule must not error.
+	ast := validAST()
+	ast.FilePath = "/nonexistent/path/deploy.runbook"
+
+	errs := v14RunbookWritableByOthers(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning for non-existent file, got %v", errs)
+	}
+}
+
+func TestV14_EmptyFilePathNoWarning(t *testing.T) {
+	ast := validAST()
+	ast.FilePath = ""
+
+	errs := v14RunbookWritableByOthers(ast)
+	if len(errs) != 0 {
+		t.Errorf("expected no warning when FilePath empty, got %v", errs)
 	}
 }

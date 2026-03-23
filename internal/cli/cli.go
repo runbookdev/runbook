@@ -59,6 +59,7 @@ checks, sequential steps, automatic rollback, and full audit logging.`,
 		newListTemplatesCmd(),
 		newHistoryCmd(),
 		newVersionCmd(),
+		newDoctorCmd(),
 	)
 
 	return root

@@ -23,6 +23,12 @@ type RunbookAST struct {
 	Waits          []WaitNode
 	FilePath       string
 	RawFrontmatter string
+	// ParseWarnings contains non-fatal issues detected during parsing, such as
+	// lines that exceed the recommended length limit.
+	ParseWarnings []string
+	// ResolvedSecrets holds the subset of resolved variables whose names match
+	// a secret pattern. Populated by the resolver; used for redaction.
+	ResolvedSecrets map[string]string
 }
 
 // Metadata holds the YAML frontmatter fields.
@@ -61,6 +67,7 @@ type StepNode struct {
 	Rollback        string
 	DependsOn       string
 	Timeout         string
+	KillGrace       string // e.g. "30s"; empty means use the executor default (10s)
 	Confirm         string
 	Env             []string
 	Line            int

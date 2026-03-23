@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/runbookdev/runbook/internal/cli"
@@ -30,6 +31,8 @@ var (
 )
 
 func main() {
+	warnIfRoot(os.Getuid(), os.Stderr)
+
 	cli.Version = version
 	cli.Commit = commit
 	cli.Date = date
@@ -38,4 +41,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(executor.RunInternalError.ExitCode())
 	}
+}
+
+// warnIfRoot prints an unsuppressible warning when the process is running as
+// the root user (uid 0). It is a separate function so tests can call it with
+// a synthetic uid without needing to run as root.
+func warnIfRoot(uid int, w io.Writer) {
+	if uid != 0 {
+		return
+	}
+	fmt.Fprintf(w, "⚠️  WARNING: runbook is running as root.\n")
+	fmt.Fprintf(w, "   Commands will execute with full system privileges.\n")
+	fmt.Fprintf(w, "   Consider running as a non-root user instead.\n")
 }
