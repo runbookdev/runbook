@@ -10,37 +10,30 @@
 
 ---
 
-## 😤 The problem
+## 😵 Why Ops Runbooks Fail
 
-Operations runbooks are broken in every organisation. The pain manifests in three ways:
+Operations runbooks usually break in one of three ways:
 
-**Stale documentation** — Wiki-based runbooks (Confluence, Notion, Google Docs) decay within weeks.
-During a 3am incident, the on-call engineer discovers half the steps reference services that no longer exist.
+- 📄 **Stale documentation**: wiki pages decay fast and become dangerous during incidents
+- 🧩 **Unreadable automation**: scripts execute, but they do not explain intent, approvals, or rollback
+- 🔒 **Vendor lock-in**: proprietary tools hide procedures outside Git, PR review, and CI
 
-**Unreadable automation** — Script-based runbooks (bash, Makefiles) are executable but lack context,
-skip explanation, have no rollback logic, and are dangerous to run without understanding every line.
+That leads to real pain:
 
-**Vendor lock-in** — Playbook tools (PagerDuty Runbooks, Rundeck) are proprietary, expensive, and cannot
-be version-controlled, reviewed in PRs, or composed with other tools.
+- ⏱️ Slower incident response because procedures are outdated or missing
+- 🧠 More tribal knowledge because new engineers cannot self-serve
+- 🔁 Repeat incidents because fixes are never codified into the workflow
+- 🧾 Weak audit trails for compliance-heavy operational work
+- 🛠️ Duplicate maintenance across docs, scripts, and internal playbooks
 
-The consequences are measurable and significant:
+### 🌍 Why now
 
-- Increased MTTR during incidents because procedures are outdated or missing
-- Onboarding friction — new engineers cannot self-serve operational knowledge and depend on tribal knowledge
-- Repeated incidents from the same root cause because post-incident improvements are never codified
-- Compliance risk — audit trails of operational actions are incomplete or nonexistent
-- Engineering time wasted maintaining duplicate sources of truth (wiki + scripts)
+- 🌱 **GitOps maturity**: infrastructure is already managed as code, but runbooks often are not
+- 🚨 **Incident tooling maturity**: incident platforms improved, but the actual procedures still live in wikis
+- 🏛️ **Compliance pressure**: SOC 2, ISO 27001, and DORA increasingly expect auditable operational workflows
+- 🤖 **AI readiness**: structured, executable runbooks are a strong foundation for AI-assisted operations
 
-### Why now
-
-Several converging trends make this the right moment:
-
-- **GitOps maturity** — teams already version-control infrastructure (Terraform, Kubernetes manifests). Runbooks are the last major operational artifact not yet managed as code.
-- **Incident management evolution** — tools like PagerDuty, Incident.io, and FireHydrant have professionalised incident response, but the actual procedures remain in wikis.
-- **Compliance tightening** — SOC 2, ISO 27001, and DORA regulations increasingly require auditable operational procedures. Manual wiki-based processes fail audits.
-- **AI readiness** — structured, executable runbooks are the ideal substrate for AI-assisted operations.
-
-## 💡 The solution
+## ✨ The solution
 
 > **Documentation and automation are the same file.** When you update the command, you update the
 > explanation in the same commit. They can never drift apart.
@@ -52,9 +45,69 @@ code blocks (`check`, `step`, `rollback`, `wait`) are the executable units.
 This means a single file is the document a human reads during an incident **and** the executable
 procedure the system runs. It lives in your Git repo, is reviewed in PRs, and is tested in CI.
 
-- 📄 A **human-readable document** that explains what, why, and how
-- ⚡ An **executable program** with typed steps, preconditions, rollback logic, and environment awareness
-- 🔀 A **version-controlled artifact** that lives alongside your code, reviewed in PRs
+- 📘 A **human-readable document** that explains what, why, and how
+- ⚙️ An **executable program** with typed steps, checks, waits, rollback logic, and environment awareness
+- 🌿 A **version-controlled artifact** that lives alongside your code and evolves with it
+
+## 🧪 Example: A Real `.runbook`
+
+The repository ships with a self-contained example in [`examples/getting-started/demo.runbook`](examples/getting-started/demo.runbook).
+It runs with standard Unix tools only, so you can try it without Docker, Kubernetes, or cloud credentials.
+
+````markdown
+---
+name: Getting Started Demo
+version: 1.0.0
+environments: [staging, production]
+timeout: 5m
+---
+
+# Getting Started Demo
+
+This runbook simulates deploying **{{runbook_name}}** version
+**{{runbook_version}}** to **{{env}}**.
+
+```check name="tmp-writable"
+test -w /tmp
+echo "/tmp is writable"
+```
+
+```step name="deploy-version" depends_on="apply-migration" rollback="rollback-version"
+  timeout: 30s
+  confirm: production
+  kill_grace: 5s
+---
+./scripts/deploy-version.sh "{{run_id}}" "{{runbook_version}}"
+```
+
+```wait name="health-soak" duration="15s"
+  abort_if: error_rate > 0%
+---
+./scripts/health-soak.sh "{{run_id}}" "{{runbook_version}}"
+```
+````
+
+Try it locally:
+
+```bash
+# From the repo root
+make build
+
+# Run the self-contained demo
+./bin/runbook run examples/getting-started/demo.runbook --env staging
+
+# Preview the execution plan without running anything
+./bin/runbook dry-run examples/getting-started/demo.runbook --env staging
+```
+
+What this example demonstrates:
+
+- ✅ `check` blocks for prerequisites
+- 🪜 `step` blocks with `depends_on`
+- ♻️ `rollback` handlers for safe failure recovery
+- ⏳ `wait` blocks with health polling
+- 🛡️ `confirm: production` gates for sensitive actions
+- 🌐 `env` filters and built-in template variables
 
 ## 📦 Installation
 
@@ -69,7 +122,7 @@ brew install runbookdev/tap/runbook
 Pre-built binaries are published on every [GitHub release](https://github.com/runbookdev/runbook/releases)
 for **Linux** (amd64, arm64), **macOS** (amd64, arm64), and **Windows** (amd64).
 
-**macOS / Linux**
+#### macOS / Linux
 
 ```bash
 # Detect platform and download the latest release
@@ -81,7 +134,7 @@ curl -sL "https://github.com/runbookdev/runbook/releases/download/${VERSION}/run
 sudo mv runbook /usr/local/bin/
 ```
 
-**Windows (PowerShell)**
+#### Windows (PowerShell)
 
 ```powershell
 # Download the latest release
@@ -115,7 +168,7 @@ make build
 sudo mv bin/runbook /usr/local/bin/
 ```
 
-## 🚀 Quick start
+## ⚡ Quick Start
 
 ```bash
 # Scaffold from a template
@@ -131,7 +184,7 @@ runbook run my-deploy.runbook --env staging --var service=api --var version=2.4.
 runbook history
 ```
 
-## 📖 Documentation
+## 🗂️ Documentation
 
 Full documentation is in the [`docs`](docs/) folder:
 
@@ -148,6 +201,11 @@ Full documentation is in the [`docs`](docs/) folder:
 | [Audit logging](docs/audit.md)                 | Execution history and `runbook history`                             |
 | [Configuration](docs/configuration.md)         | `~/.runbook/config.yaml`                                            |
 | [Built-in templates](docs/templates.md)        | 10 production-ready starting points                                 |
+
+## 🧰 More Examples
+
+- [`examples/getting-started`](examples/getting-started/) - self-contained demo with checks, waits, rollbacks, and confirmation gates
+- [`examples/docker-compose-deploy`](examples/docker-compose-deploy/) - realistic Docker Compose deployment flow for a VPS or bare-metal host
 
 ## 🤝 Contributing
 
