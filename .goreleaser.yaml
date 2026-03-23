@@ -16,6 +16,8 @@ builds:
       - -X main.version={{ .Version }}
       - -X main.commit={{ .ShortCommit }}
       - -X main.date={{ .Date }}
+    tags:
+      - netgo
     goos:
       - linux
       - darwin
