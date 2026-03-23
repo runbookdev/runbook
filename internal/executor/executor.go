@@ -272,7 +272,6 @@ func buildResult(stepName string, waitErr error, stdoutBuf, stderrBuf *limitedBu
 	return nil, fmt.Errorf("executing step %q: %w", stepName, waitErr)
 }
 
-
 // checkOrphans looks for processes whose PPID matches parentPID and logs a
 // warning if any are found. Called asynchronously after a kill.
 func checkOrphans(parentPID int, stepName string, w io.Writer) {

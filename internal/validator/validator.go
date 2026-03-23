@@ -26,8 +26,9 @@ import (
 	"time"
 
 	"github.com/agnivade/levenshtein"
-	rbast "github.com/runbookdev/runbook/internal/ast"
 	"gopkg.in/yaml.v3"
+
+	rbast "github.com/runbookdev/runbook/internal/ast"
 )
 
 // Severity indicates whether a validation issue is an error or warning.

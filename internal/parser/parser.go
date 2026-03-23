@@ -21,8 +21,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/runbookdev/runbook/internal/ast"
 	"gopkg.in/yaml.v3"
+
+	"github.com/runbookdev/runbook/internal/ast"
 )
 
 const (
