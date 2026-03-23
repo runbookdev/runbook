@@ -56,12 +56,68 @@ procedure the system runs. It lives in your Git repo, is reviewed in PRs, and is
 - ⚡ An **executable program** with typed steps, preconditions, rollback logic, and environment awareness
 - 🔀 A **version-controlled artifact** that lives alongside your code, reviewed in PRs
 
+## 📦 Installation
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install runbookdev/tap/runbook
+```
+
+### Download binary
+
+Pre-built binaries are published on every [GitHub release](https://github.com/runbookdev/runbook/releases)
+for **Linux** (amd64, arm64), **macOS** (amd64, arm64), and **Windows** (amd64).
+
+**macOS / Linux**
+
+```bash
+# Detect platform and download the latest release
+VERSION=$(curl -s https://api.github.com/repos/runbookdev/runbook/releases/latest | grep tag_name | cut -d '"' -f4)
+OS=$(uname -s | tr A-Z a-z)
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+curl -sL "https://github.com/runbookdev/runbook/releases/download/${VERSION}/runbook_${VERSION#v}_${OS}_${ARCH}.tar.gz" | tar xz
+sudo mv runbook /usr/local/bin/
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# Download the latest release
+$VERSION = (Invoke-RestMethod https://api.github.com/repos/runbookdev/runbook/releases/latest).tag_name
+$URL = "https://github.com/runbookdev/runbook/releases/download/$VERSION/runbook_$($VERSION.TrimStart('v'))_windows_amd64.zip"
+
+Invoke-WebRequest -Uri $URL -OutFile runbook.zip
+Expand-Archive runbook.zip -DestinationPath "$env:LOCALAPPDATA\runbook"
+# Add to PATH (current session)
+$env:PATH += ";$env:LOCALAPPDATA\runbook"
+```
+
+> **Tip:** Add `$env:LOCALAPPDATA\runbook` to your system PATH for permanent access.
+
+### Verify checksum
+
+Every release includes a `checksums.txt` file (SHA-256). After downloading, verify the archive integrity:
+
+```bash
+sha256sum --check checksums.txt --ignore-missing
+```
+
+### Build from source
+
+Requires **Go 1.26+** and a C compiler (CGO is needed for the embedded SQLite audit log).
+
+```bash
+git clone https://github.com/runbookdev/runbook.git
+cd runbook
+make build
+sudo mv bin/runbook /usr/local/bin/
+```
+
 ## 🚀 Quick start
 
 ```bash
-# Install
-brew install runbookdev/tap/runbook
-
 # Scaffold from a template
 runbook init --template=deploy my-deploy.runbook
 
@@ -79,28 +135,19 @@ runbook history
 
 Full documentation is in the [`docs`](docs/) folder:
 
-| | |
-|--|--|
-| [Getting started](docs/getting-started.md) | Install, scaffold, and run your first runbook |
-| [File format](docs/FORMAT.md) | Frontmatter, block types, and syntax reference |
-| [CLI reference](docs/cli-reference.md) | All commands, flags, and exit codes |
-| [Shell integration](docs/shell-integration.md) | Tab completion, `rb` alias, `runbook-detect`, and prompt indicator |
-| [Project detection](docs/detect.md) | How project types, environments, and tool availability are detected |
-| [Template variables](docs/variables.md) | `{{variable}}` resolution and built-ins |
-| [Safety features](docs/safety.md) | Rollback, timeouts, confirmation gates, signal handling |
-| [Security](docs/security.md) | Static analysis, secret redaction, secure temp files |
-| [Audit logging](docs/audit.md) | Execution history and `runbook history` |
-| [Configuration](docs/configuration.md) | `~/.runbook/config.yaml` |
-| [Built-in templates](docs/templates.md) | 10 production-ready starting points |
-
-## 🔨 Building from source
-
-```bash
-git clone https://github.com/runbookdev/runbook.git
-cd runbook
-make build    # requires Go 1.26+ and CGO
-make test
-```
+|                                                |                                                                     |
+|------------------------------------------------|---------------------------------------------------------------------|
+| [Getting started](docs/getting-started.md)     | Install, scaffold, and run your first runbook                       |
+| [File format](docs/FORMAT.md)                  | Frontmatter, block types, and syntax reference                      |
+| [CLI reference](docs/cli-reference.md)         | All commands, flags, and exit codes                                 |
+| [Shell integration](docs/shell-integration.md) | Tab completion, `rb` alias, `runbook-detect`, and prompt indicator  |
+| [Project detection](docs/detect.md)            | How project types, environments, and tool availability are detected |
+| [Template variables](docs/variables.md)        | `{{variable}}` resolution and built-ins                             |
+| [Safety features](docs/safety.md)              | Rollback, timeouts, confirmation gates, signal handling             |
+| [Security](docs/security.md)                   | Static analysis, secret redaction, secure temp files                |
+| [Audit logging](docs/audit.md)                 | Execution history and `runbook history`                             |
+| [Configuration](docs/configuration.md)         | `~/.runbook/config.yaml`                                            |
+| [Built-in templates](docs/templates.md)        | 10 production-ready starting points                                 |
 
 ## 🤝 Contributing
 
