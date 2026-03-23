@@ -24,9 +24,10 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
 	"github.com/runbookdev/runbook/internal/audit"
 	"github.com/runbookdev/runbook/internal/executor"
-	"github.com/spf13/cobra"
 )
 
 func newRunCmd() *cobra.Command {
@@ -123,6 +124,10 @@ local audit log.`,
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show detailed step output in the summary")
 	cmd.Flags().StringVar(&auditDir, "audit-dir", "", "path to the audit database (default: ~/.runbook/audit/runbook.db)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat shell metacharacter warnings as hard errors (exit code 3)")
+
+	cmd.ValidArgsFunction = completeRunbookFiles
+	_ = cmd.RegisterFlagCompletionFunc("env", completeEnvNames)
+	_ = cmd.RegisterFlagCompletionFunc("var", completeVarNames)
 
 	return cmd
 }

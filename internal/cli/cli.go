@@ -60,6 +60,9 @@ checks, sequential steps, automatic rollback, and full audit logging.`,
 		newHistoryCmd(),
 		newVersionCmd(),
 		newDoctorCmd(),
+		newEnvCmd(),
+		newCompletionCmd(),
+		newShellInitCmd(),
 	)
 
 	return root

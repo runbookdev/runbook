@@ -24,10 +24,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/runbookdev/runbook/internal/audit"
-	"github.com/runbookdev/runbook/internal/parser"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/runbookdev/runbook/internal/audit"
+	"github.com/runbookdev/runbook/internal/parser"
 )
 
 const (

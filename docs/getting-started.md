@@ -75,7 +75,7 @@ environment filters, `kill_grace`, and built-in template variables.
 
 ## What a .runbook file looks like
 
-```markdown
+````markdown
 ---
 name: Deploy API to Production
 version: 2.4.0
@@ -114,7 +114,7 @@ kubectl get nodes | grep -c Ready | test $(cat) -ge 3
 kubectl set image deployment/api api={{image}}:{{version}}
 kubectl rollout status deployment/api
 ```
-```
+````
 
 The Markdown body is the documentation a human reads. The typed code blocks
 (`check`, `step`, `rollback`, `wait`) are the executable units.
@@ -125,6 +125,8 @@ The Markdown body is the documentation a human reads. The typed code blocks
 
 - [File format reference](format.md) — full syntax for all block types and frontmatter fields
 - [CLI reference](cli-reference.md) — all commands, flags, and exit codes
+- [Shell integration](shell-integration.md) — tab completion, `rb` alias, `runbook-detect`, and prompt indicator
+- [Project detection](detect.md) — how project types, environments, and tool availability are detected
 - [Template variables](variables.md) — `{{variable}}` resolution and built-ins
 - [Safety features](safety.md) — rollback, timeouts, confirmation gates, signal handling
 - [Security](security.md) — static analysis, secret redaction, secure temp files

@@ -22,8 +22,9 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/runbookdev/runbook/internal/audit"
 	"github.com/spf13/cobra"
+
+	"github.com/runbookdev/runbook/internal/audit"
 )
 
 func newHistoryCmd() *cobra.Command {
@@ -102,11 +103,9 @@ func showRunList(al *audit.Logger, limit int) error {
 			id = id[:8]
 		}
 
-		duration := ""
+		duration := "running"
 		if r.FinishedAt != nil {
 			duration = r.FinishedAt.Sub(r.StartedAt).Round(time.Millisecond).String()
-		} else {
-			duration = "running"
 		}
 
 		started := r.StartedAt.Local().Format("2006-01-02 15:04:05")
@@ -116,8 +115,7 @@ func showRunList(al *audit.Logger, limit int) error {
 			id, r.Name, r.Environment, status, duration, started)
 	}
 
-	w.Flush()
-	return nil
+	return w.Flush()
 }
 
 func showRunDetail(al *audit.Logger, runID string) error {

@@ -77,13 +77,15 @@ runbook history
 
 ## 📖 Documentation
 
-Full documentation is in the [`docs/`](docs/) folder:
+Full documentation is in the [`docs`](docs/) folder:
 
 | | |
 |--|--|
 | [Getting started](docs/getting-started.md) | Install, scaffold, and run your first runbook |
 | [File format](docs/FORMAT.md) | Frontmatter, block types, and syntax reference |
 | [CLI reference](docs/cli-reference.md) | All commands, flags, and exit codes |
+| [Shell integration](docs/shell-integration.md) | Tab completion, `rb` alias, `runbook-detect`, and prompt indicator |
+| [Project detection](docs/detect.md) | How project types, environments, and tool availability are detected |
 | [Template variables](docs/variables.md) | `{{variable}}` resolution and built-ins |
 | [Safety features](docs/safety.md) | Rollback, timeouts, confirmation gates, signal handling |
 | [Security](docs/security.md) | Static analysis, secret redaction, secure temp files |

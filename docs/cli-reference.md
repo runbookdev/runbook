@@ -173,6 +173,124 @@ runbook doctor deploy.runbook
 
 ---
 
+## runbook env
+
+Inspect the project environment without requiring shell hooks. Detects the project type, lists
+`.runbook` files, reports required tools and their `PATH` availability, and lists all environments
+declared across `.runbook` frontmatter.
+
+```
+runbook env [dir] [flags]
+```
+
+| Flag             | Description                                                              |
+|------------------|--------------------------------------------------------------------------|
+| `--json`         | Output machine-readable JSON                                             |
+| `--check-tools`  | Exit `0` if all required tools are present, `1` if any are missing       |
+
+**Examples:**
+
+```bash
+# Human-readable summary of the current directory
+runbook env
+
+# Inspect a specific directory
+runbook env ./services/api
+
+# Machine-readable JSON
+runbook env --json
+
+# CI pre-flight: fail if any required tool is missing
+runbook env --check-tools
+```
+
+**JSON output shape:**
+
+```json
+{
+  "project_type": "Go project",
+  "runbooks": [
+    {
+      "file": "deploy.runbook",
+      "name": "Deploy service",
+      "environments": ["staging", "production"]
+    }
+  ],
+  "tools": {
+    "required": ["go", "golangci-lint"],
+    "found":    ["go"],
+    "missing":  ["golangci-lint"]
+  },
+  "environments": ["staging", "production"]
+}
+```
+
+See [Shell integration](shell-integration.md) for the interactive `runbook-detect` shell function.
+
+---
+
+## runbook shell-init
+
+Output a shell integration snippet that installs tab completion, the `rb` alias, and the
+`runbook-detect` helper function. Source it in your shell profile.
+
+```
+runbook shell-init [flags]
+```
+
+| Flag            | Description                                                    |
+|-----------------|----------------------------------------------------------------|
+| `--shell <name>`| Target shell: `bash`, `zsh`, or `fish` (default: auto-detect) |
+
+**Setup:**
+
+```bash
+# Bash (~/.bashrc)
+eval "$(runbook shell-init)"
+
+# Zsh (~/.zshrc)
+eval "$(runbook shell-init)"
+
+# Fish (~/.config/fish/config.fish)
+runbook shell-init --shell fish | source
+```
+
+The snippet provides:
+
+- **Tab completion** for all commands, flags, and `.runbook` files (inlined; no subprocess at
+  shell startup)
+- **`rb` alias** — shorthand for `runbook`
+- **`runbook-detect`** — scans the current directory and prints a project summary
+- **`runbook-prompt-indicator`** — optional prompt prefix showing the number of `.runbook` files
+
+See [Shell integration](shell-integration.md) for full details and prompt customisation.
+
+---
+
+## runbook completion
+
+Generate a raw shell completion script. Prefer `runbook shell-init` for interactive use; this
+command is intended for package maintainers or custom integrations.
+
+```
+runbook completion [bash|zsh|fish]
+```
+
+This command is hidden from the default help output.
+
+**Examples:**
+
+```bash
+# Load once in the current session
+source <(runbook completion bash)
+source <(runbook completion zsh)
+
+# Persist for fish
+runbook completion fish > ~/.config/fish/completions/runbook.fish
+```
+
+---
+
 ## runbook version
 
 Print version, commit hash, build date, Go version, and platform.

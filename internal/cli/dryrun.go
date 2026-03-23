@@ -19,8 +19,9 @@ import (
 	"os"
 
 	"github.com/fatih/color"
-	"github.com/runbookdev/runbook/internal/executor"
 	"github.com/spf13/cobra"
+
+	"github.com/runbookdev/runbook/internal/executor"
 )
 
 func newDryRunCmd() *cobra.Command {
@@ -68,6 +69,10 @@ func newDryRunCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "set a variable (repeatable, format: key=value)")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "path to a .env file")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show debug-level resolution details")
+
+	cmd.ValidArgsFunction = completeRunbookFiles
+	_ = cmd.RegisterFlagCompletionFunc("env", completeEnvNames)
+	_ = cmd.RegisterFlagCompletionFunc("var", completeVarNames)
 
 	return cmd
 }

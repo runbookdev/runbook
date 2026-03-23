@@ -19,10 +19,11 @@ import (
 	"os"
 
 	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
 	"github.com/runbookdev/runbook/internal/executor"
 	"github.com/runbookdev/runbook/internal/parser"
 	"github.com/runbookdev/runbook/internal/validator"
-	"github.com/spf13/cobra"
 )
 
 func newValidateCmd() *cobra.Command {
@@ -93,6 +94,8 @@ any security advisory.`,
 
 	cmd.Flags().BoolVar(&securityStrict, "security-strict", false,
 		"promote security advisory warnings (v15–v20) to errors")
+
+	cmd.ValidArgsFunction = completeRunbookFiles
 
 	return cmd
 }

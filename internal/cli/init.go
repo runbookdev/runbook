@@ -156,6 +156,8 @@ Use "runbook list-templates" to see available templates.`,
 
 	cmd.Flags().StringVar(&templateName, "template", "", "built-in template name (see list-templates)")
 
+	_ = cmd.RegisterFlagCompletionFunc("template", completeTemplateNames)
+
 	return cmd
 }
 
