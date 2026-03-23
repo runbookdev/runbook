@@ -65,8 +65,7 @@ Pull the new image before taking anything down, so the switch is fast.
 ```step name="pull-image"
   timeout: 300s
 ---
-docker compose -f {{compose_file}} pull {{service}}
-echo "Pulled {{service}}:{{version}}"
+./scripts/pull-image.sh "{{compose_file}}" "{{service}}" "{{version}}"
 ```
 
 ---
@@ -79,21 +78,11 @@ Create a timestamped dump so rollback can restore to the exact pre-deploy state.
   timeout: 300s
   confirm: production
 ---
-BACKUP_FILE="/tmp/{{service}}-{{env}}-$(date +%Y%m%dT%H%M%S).sql.gz"
-docker exec {{db_container}} pg_dumpall -U postgres | gzip > "$BACKUP_FILE"
-echo "Backup written to $BACKUP_FILE"
-echo "$BACKUP_FILE" > /tmp/{{service}}-last-backup.txt
+./scripts/backup-database.sh "{{service}}" "{{env}}" "{{db_container}}"
 ```
 
 ```rollback name="rollback-backup"
-BACKUP_FILE=$(cat /tmp/{{service}}-last-backup.txt 2>/dev/null)
-if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
-  echo "No backup file found — skipping restore"
-  exit 0
-fi
-echo "Restoring from $BACKUP_FILE"
-gunzip -c "$BACKUP_FILE" | docker exec -i {{db_container}} psql -U postgres
-echo "Database restored"
+./scripts/rollback-backup.sh "{{service}}" "{{db_container}}"
 ```
 
 ---
@@ -103,20 +92,11 @@ echo "Database restored"
 ```step name="run-migrations" depends_on="backup-database" rollback="rollback-migrations"
   timeout: 180s
 ---
-docker compose -f {{compose_file}} run --rm {{service}} \
-  sh -c "migrate -path /app/migrations -database \$DATABASE_URL up"
-echo "Migrations applied"
+./scripts/run-migrations.sh "{{compose_file}}" "{{service}}"
 ```
 
 ```rollback name="rollback-migrations"
-BACKUP_FILE=$(cat /tmp/{{service}}-last-backup.txt 2>/dev/null)
-if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
-  echo "No backup file found — skipping restore"
-  exit 0
-fi
-echo "Restoring pre-migration database snapshot"
-gunzip -c "$BACKUP_FILE" | docker exec -i {{db_container}} psql -U postgres
-echo "Database restored to pre-migration state"
+./scripts/rollback-migrations.sh "{{service}}" "{{db_container}}"
 ```
 
 ---
@@ -130,15 +110,11 @@ previous image tag and restarts.
   timeout: 120s
   confirm: production
 ---
-docker compose -f {{compose_file}} up -d --no-deps --force-recreate {{service}}
-echo "Container restarted with {{service}}:{{version}}"
+./scripts/restart-containers.sh "{{compose_file}}" "{{service}}" "{{version}}"
 ```
 
 ```rollback name="rollback-containers"
-echo "Rolling back container to previous image"
-docker compose -f {{compose_file}} up -d --no-deps --force-recreate --scale {{service}}=1 {{service}}
-docker compose -f {{compose_file}} restart {{service}}
-echo "Rollback complete"
+./scripts/rollback-containers.sh "{{compose_file}}" "{{service}}"
 ```
 
 ---
@@ -152,17 +128,7 @@ respond `ok` during the soak period.
 ```wait name="health-soak" duration="60s"
   abort_if: error_rate > 0%
 ---
-FAILURES=0
-for i in $(seq 1 6); do
-  STATUS=$(curl -sf --max-time 5 {{app_url}}/health | jq -r '.status' 2>/dev/null || echo "unreachable")
-  echo "Health poll $i/6: $STATUS"
-  if [ "$STATUS" != "ok" ]; then
-    FAILURES=$((FAILURES + 1))
-    echo "WARNING: unhealthy response on poll $i"
-  fi
-  sleep 10
-done
-test "$FAILURES" -eq 0
+./scripts/health-soak.sh "{{app_url}}"
 ```
 
 ---
@@ -175,19 +141,7 @@ key API endpoints return HTTP 200.
 ```step name="smoke-test" depends_on="restart-containers"
   timeout: 60s
 ---
-# Version check
-RUNNING=$(curl -sf {{app_url}}/version | jq -r '.version')
-echo "Running version: $RUNNING"
-test "$RUNNING" = "{{version}}"
-
-# Key endpoint checks
-for ENDPOINT in /health /ready /metrics; do
-  CODE=$(curl -o /dev/null -sw '%{http_code}' {{app_url}}${ENDPOINT})
-  echo "GET {{app_url}}${ENDPOINT} → HTTP $CODE"
-  test "$CODE" = "200"
-done
-
-echo "Smoke tests passed"
+./scripts/smoke-test.sh "{{app_url}}" "{{version}}"
 ```
 
 ---
@@ -201,6 +155,5 @@ is logged but does not affect the deployment outcome.
   timeout: 60s
   env: [staging]
 ---
-RECLAIMED=$(docker image prune -f | grep "Total reclaimed" || echo "0B reclaimed")
-echo "Image prune: $RECLAIMED"
+./scripts/prune-images.sh
 ```
