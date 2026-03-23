@@ -1,0 +1,287 @@
+---
+name: Getting Started Demo
+version: 1.0.0
+description: |
+  A self-contained runbook you can run immediately — no external services,
+  no Docker, no cloud credentials. It simulates a full deployment workflow
+  (backup → migrate → deploy → verify → cleanup) using only standard Unix
+  shell tools and a temporary directory.
+
+  Every feature is demonstrated: check blocks, step blocks with rollback,
+  a wait block with health polling, depends_on chaining, confirm gates,
+  environment filters, kill_grace, and built-in template variables.
+owners: [you]
+environments: [staging, production]
+timeout: 5m
+---
+
+# Getting Started Demo
+
+This runbook simulates deploying **{{runbook_name}}** version
+**{{runbook_version}}** to **{{env}}**.
+
+All state is written to `/tmp/runbook-demo-{{run_id}}/` and cleaned up at
+the end. The run ID `{{run_id}}` is unique to each execution, so concurrent
+runs do not interfere.
+
+Run it with:
+
+```bash
+# Staging (no confirmation prompts)
+runbook run demo.runbook --env staging
+
+# Production (prompts before deploy)
+runbook run demo.runbook --env production
+```
+
+---
+
+## Prerequisites
+
+```check name="tmp-writable"
+test -w /tmp
+echo "/tmp is writable"
+```
+
+```check name="env-recognised"
+case "{{env}}" in
+  staging|production) echo "Environment '{{env}}' is valid" ;;
+  *) echo "Unknown environment '{{env}}' — expected staging or production"; exit 1 ;;
+esac
+```
+
+---
+
+## Step 1 — Set Up Workspace
+
+Creates the temporary workspace that represents the running service.
+
+```step name="setup-workspace" rollback="teardown-workspace"
+  timeout: 10s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+mkdir -p "$WORKDIR/backup"
+
+# Simulate a service already running at version 0.9.0.
+echo "0.9.0"                                   > "$WORKDIR/current-version"
+echo "tables: users, orders, products"         > "$WORKDIR/db-state"
+echo "status: running"                         > "$WORKDIR/service-status"
+
+echo "Workspace created: $WORKDIR"
+echo "Simulated service is running v$(cat $WORKDIR/current-version)"
+```
+
+```rollback name="teardown-workspace"
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+rm -rf "$WORKDIR"
+echo "Workspace removed"
+```
+
+---
+
+## Step 2 — Back Up Current State
+
+Snapshot the service version and database state before making any changes.
+If anything goes wrong after this point the rollback blocks below can
+restore the system to exactly this snapshot.
+
+```step name="backup-state" depends_on="setup-workspace"
+  timeout: 10s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+cp "$WORKDIR/current-version" "$WORKDIR/backup/current-version.bak"
+cp "$WORKDIR/db-state"        "$WORKDIR/backup/db-state.bak"
+
+echo "Backup written to $WORKDIR/backup/"
+echo "  current-version → $(cat $WORKDIR/backup/current-version.bak)"
+echo "  db-state        → $(cat $WORKDIR/backup/db-state.bak)"
+```
+
+---
+
+## Step 3 — Run Database Migration
+
+Applies schema migration `0002_add_payments_table`. The rollback handler
+restores the database snapshot taken in Step 2.
+
+```step name="apply-migration" depends_on="backup-state" rollback="undo-migration"
+  timeout: 30s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+
+echo "Applying migration 0002_add_payments_table..."
+sleep 1
+echo "tables: users, orders, products, payments" > "$WORKDIR/db-state"
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  0002_add_payments_table  applied" \
+  >> "$WORKDIR/migration.log"
+
+echo "Migration complete"
+echo "DB state: $(cat $WORKDIR/db-state)"
+```
+
+```rollback name="undo-migration"
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+cp "$WORKDIR/backup/db-state.bak" "$WORKDIR/db-state"
+rm -f "$WORKDIR/migration.log"
+echo "Migration rolled back — DB state: $(cat $WORKDIR/db-state)"
+```
+
+---
+
+## Step 4 — Deploy New Version
+
+Simulates a graceful service restart: the old process is stopped with
+`SIGTERM`, given 5 seconds to drain, then the new version is started.
+`confirm: production` prompts for approval before this step runs in
+production. The rollback handler re-pins the previous version.
+
+```step name="deploy-version" depends_on="apply-migration" rollback="rollback-version"
+  timeout: 30s
+  confirm: production
+  kill_grace: 5s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+PREV=$(cat "$WORKDIR/current-version")
+
+echo "Stopping service v$PREV (graceful drain, up to 5 s)..."
+sleep 1
+echo "Service v$PREV stopped"
+
+echo "{{runbook_version}}" > "$WORKDIR/current-version"
+echo "status: running"     > "$WORKDIR/service-status"
+
+echo "Service v{{runbook_version}} started"
+```
+
+```rollback name="rollback-version"
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+CURRENT=$(cat "$WORKDIR/current-version" 2>/dev/null || echo "unknown")
+echo "Stopping service v$CURRENT..."
+cp "$WORKDIR/backup/current-version.bak" "$WORKDIR/current-version"
+PREV=$(cat "$WORKDIR/current-version")
+echo "Service rolled back to v$PREV"
+```
+
+---
+
+## Step 5 — Health Soak
+
+Polls the service every 3 seconds for 15 seconds. Exits non-zero if
+the service ever reports the wrong version, which triggers rollback of
+all preceding steps.
+
+```wait name="health-soak" duration="15s"
+  abort_if: error_rate > 0%
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+EXPECTED="{{runbook_version}}"
+FAILURES=0
+
+for i in $(seq 1 5); do
+  RUNNING=$(cat "$WORKDIR/current-version" 2>/dev/null || echo "missing")
+  STATUS=$(cat  "$WORKDIR/service-status"  2>/dev/null || echo "unknown")
+  if [ "$RUNNING" = "$EXPECTED" ] && [ "$STATUS" = "running" ]; then
+    echo "Health check $i/5: ok (v$RUNNING, $STATUS)"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "Health check $i/5: FAIL (version=$RUNNING status=$STATUS)"
+  fi
+  sleep 3
+done
+
+test "$FAILURES" -eq 0
+```
+
+---
+
+## Step 6 — Smoke Tests
+
+Verifies the deployed version, migration log, and updated DB schema.
+
+```step name="smoke-test" depends_on="deploy-version"
+  timeout: 15s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+PASS=0
+FAIL=0
+
+check() {
+  local label="$1"; shift
+  if "$@" > /dev/null 2>&1; then
+    echo "  ✓ $label"; PASS=$((PASS + 1))
+  else
+    echo "  ✗ $label"; FAIL=$((FAIL + 1))
+  fi
+}
+
+echo "Running smoke tests..."
+check "service version is {{runbook_version}}" \
+  test "$(cat $WORKDIR/current-version)" = "{{runbook_version}}"
+check "service status is running" \
+  grep -q "running" "$WORKDIR/service-status"
+check "migration log exists" \
+  test -f "$WORKDIR/migration.log"
+check "payments table in DB schema" \
+  grep -q "payments" "$WORKDIR/db-state"
+
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+test "$FAIL" -eq 0
+```
+
+---
+
+## Step 7 — Extended Tests (staging only)
+
+Runs additional integration checks that are safe to skip in production
+because the confirmation gate and health soak already provide confidence.
+
+```step name="extended-tests" depends_on="smoke-test"
+  timeout: 15s
+  env: [staging]
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+
+echo "Running extended integration checks (staging only)..."
+sleep 1
+echo "  ✓ Migration idempotency check"
+sleep 1
+echo "  ✓ Backwards-compatibility check"
+sleep 1
+echo "Extended tests passed"
+```
+
+---
+
+## Step 8 — Finalize
+
+Prints a deployment summary and removes the temporary workspace.
+
+```step name="finalize" depends_on="smoke-test" rollback="rollback-finalize"
+  timeout: 10s
+---
+WORKDIR="/tmp/runbook-demo-{{run_id}}"
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "  Deployment Summary"
+echo "═══════════════════════════════════════"
+echo "  Service:     {{runbook_name}}"
+echo "  Version:     $(cat $WORKDIR/current-version)"
+echo "  Environment: {{env}}"
+echo "  Deployed by: {{user}}"
+echo "  Timestamp:   {{timestamp}}"
+echo "  Run ID:      {{run_id}}"
+echo "═══════════════════════════════════════"
+echo ""
+
+rm -rf "$WORKDIR"
+echo "Workspace cleaned up"
+```
+
+```rollback name="rollback-finalize"
+# teardown-workspace (the rollback for setup-workspace) will remove the
+# workspace directory as part of the LIFO rollback chain, so there is
+# nothing extra to undo here.
+echo "Nothing to undo for finalize — workspace will be removed by teardown-workspace"
+```

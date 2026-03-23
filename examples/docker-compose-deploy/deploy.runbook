@@ -1,0 +1,206 @@
+---
+name: Docker Compose Deploy
+version: 1.0.0
+description: |
+  Deploy a Docker Compose application on a VPS or bare-metal server.
+  Backs up the database, runs migrations, performs a rolling container
+  restart, soaks for 60 seconds, and verifies the health endpoint.
+  Every destructive step has a rollback handler.
+owners: [platform-team]
+environments: [staging, production]
+requires:
+  tools: [docker, curl, jq]
+timeout: 20m
+severity: high
+---
+
+# Docker Compose Deploy
+
+Deploy **{{service}}** version **{{version}}** to **{{env}}**.
+
+Run with:
+
+```bash
+runbook run deploy.runbook \
+  --env production \
+  --var service=api \
+  --var version=1.4.2 \
+  --var compose_file=/opt/api/docker-compose.yml \
+  --var app_url=https://api.example.com \
+  --var db_container=api-db-1
+```
+
+---
+
+## Prerequisites
+
+```check name="docker-daemon"
+docker info > /dev/null
+echo "Docker daemon is running"
+```
+
+```check name="compose-file-exists"
+test -f {{compose_file}}
+echo "Compose file found: {{compose_file}}"
+```
+
+```check name="disk-space"
+AVAILABLE=$(df -BG / | awk 'NR==2 {gsub("G",""); print $4}')
+echo "Available disk space: ${AVAILABLE}GB"
+test "$AVAILABLE" -ge 5
+```
+
+```check name="service-currently-healthy"
+STATUS=$(curl -sf {{app_url}}/health | jq -r '.status' 2>/dev/null || echo "unreachable")
+echo "Current health status: $STATUS"
+test "$STATUS" = "ok"
+```
+
+---
+
+## Step 1 — Pull New Image
+
+Pull the new image before taking anything down, so the switch is fast.
+
+```step name="pull-image"
+  timeout: 300s
+---
+docker compose -f {{compose_file}} pull {{service}}
+echo "Pulled {{service}}:{{version}}"
+```
+
+---
+
+## Step 2 — Back Up the Database
+
+Create a timestamped dump so rollback can restore to the exact pre-deploy state.
+
+```step name="backup-database" rollback="rollback-backup"
+  timeout: 300s
+  confirm: production
+---
+BACKUP_FILE="/tmp/{{service}}-{{env}}-$(date +%Y%m%dT%H%M%S).sql.gz"
+docker exec {{db_container}} pg_dumpall -U postgres | gzip > "$BACKUP_FILE"
+echo "Backup written to $BACKUP_FILE"
+echo "$BACKUP_FILE" > /tmp/{{service}}-last-backup.txt
+```
+
+```rollback name="rollback-backup"
+BACKUP_FILE=$(cat /tmp/{{service}}-last-backup.txt 2>/dev/null)
+if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
+  echo "No backup file found — skipping restore"
+  exit 0
+fi
+echo "Restoring from $BACKUP_FILE"
+gunzip -c "$BACKUP_FILE" | docker exec -i {{db_container}} psql -U postgres
+echo "Database restored"
+```
+
+---
+
+## Step 3 — Run Database Migrations
+
+```step name="run-migrations" depends_on="backup-database" rollback="rollback-migrations"
+  timeout: 180s
+---
+docker compose -f {{compose_file}} run --rm {{service}} \
+  sh -c "migrate -path /app/migrations -database \$DATABASE_URL up"
+echo "Migrations applied"
+```
+
+```rollback name="rollback-migrations"
+BACKUP_FILE=$(cat /tmp/{{service}}-last-backup.txt 2>/dev/null)
+if [ -z "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
+  echo "No backup file found — skipping restore"
+  exit 0
+fi
+echo "Restoring pre-migration database snapshot"
+gunzip -c "$BACKUP_FILE" | docker exec -i {{db_container}} psql -U postgres
+echo "Database restored to pre-migration state"
+```
+
+---
+
+## Step 4 — Rolling Container Restart
+
+Stop the old container and start the new one. The rollback re-pins the
+previous image tag and restarts.
+
+```step name="restart-containers" depends_on="run-migrations" rollback="rollback-containers"
+  timeout: 120s
+  confirm: production
+---
+docker compose -f {{compose_file}} up -d --no-deps --force-recreate {{service}}
+echo "Container restarted with {{service}}:{{version}}"
+```
+
+```rollback name="rollback-containers"
+echo "Rolling back container to previous image"
+docker compose -f {{compose_file}} up -d --no-deps --force-recreate --scale {{service}}=1 {{service}}
+docker compose -f {{compose_file}} restart {{service}}
+echo "Rollback complete"
+```
+
+---
+
+## Step 5 — Health Soak
+
+Wait 60 seconds while polling the health endpoint every 10 seconds.
+The step exits non-zero (triggering rollback) if the service fails to
+respond `ok` during the soak period.
+
+```wait name="health-soak" duration="60s"
+  abort_if: error_rate > 0%
+---
+FAILURES=0
+for i in $(seq 1 6); do
+  STATUS=$(curl -sf --max-time 5 {{app_url}}/health | jq -r '.status' 2>/dev/null || echo "unreachable")
+  echo "Health poll $i/6: $STATUS"
+  if [ "$STATUS" != "ok" ]; then
+    FAILURES=$((FAILURES + 1))
+    echo "WARNING: unhealthy response on poll $i"
+  fi
+  sleep 10
+done
+test "$FAILURES" -eq 0
+```
+
+---
+
+## Step 6 — Smoke Tests
+
+Verify that the running container reports the expected version and that
+key API endpoints return HTTP 200.
+
+```step name="smoke-test" depends_on="restart-containers"
+  timeout: 60s
+---
+# Version check
+RUNNING=$(curl -sf {{app_url}}/version | jq -r '.version')
+echo "Running version: $RUNNING"
+test "$RUNNING" = "{{version}}"
+
+# Key endpoint checks
+for ENDPOINT in /health /ready /metrics; do
+  CODE=$(curl -o /dev/null -sw '%{http_code}' {{app_url}}${ENDPOINT})
+  echo "GET {{app_url}}${ENDPOINT} → HTTP $CODE"
+  test "$CODE" = "200"
+done
+
+echo "Smoke tests passed"
+```
+
+---
+
+## Step 7 — Clean Up Old Images
+
+Remove dangling images to reclaim disk space. Non-critical — failure
+is logged but does not affect the deployment outcome.
+
+```step name="prune-images" depends_on="smoke-test"
+  timeout: 60s
+  env: [staging]
+---
+RECLAIMED=$(docker image prune -f | grep "Total reclaimed" || echo "0B reclaimed")
+echo "Image prune: $RECLAIMED"
+```

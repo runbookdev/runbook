@@ -12,13 +12,45 @@
 
 ## 😤 The problem
 
-Operations runbooks are broken everywhere.
+Operations runbooks are broken in every organisation. The pain manifests in three ways:
 
-Wiki pages go stale within weeks. Shell scripts are executable but unreadable. Vendor tools are locked-in and expensive. Teams are forced to choose between **documentation that nobody trusts** and **automation that nobody can read**.
+**Stale documentation** — Wiki-based runbooks (Confluence, Notion, Google Docs) decay within weeks.
+During a 3am incident, the on-call engineer discovers half the steps reference services that no longer exist.
+
+**Unreadable automation** — Script-based runbooks (bash, Makefiles) are executable but lack context,
+skip explanation, have no rollback logic, and are dangerous to run without understanding every line.
+
+**Vendor lock-in** — Playbook tools (PagerDuty Runbooks, Rundeck) are proprietary, expensive, and cannot
+be version-controlled, reviewed in PRs, or composed with other tools.
+
+The consequences are measurable and significant:
+
+- Increased MTTR during incidents because procedures are outdated or missing
+- Onboarding friction — new engineers cannot self-serve operational knowledge and depend on tribal knowledge
+- Repeated incidents from the same root cause because post-incident improvements are never codified
+- Compliance risk — audit trails of operational actions are incomplete or nonexistent
+- Engineering time wasted maintaining duplicate sources of truth (wiki + scripts)
+
+### Why now
+
+Several converging trends make this the right moment:
+
+- **GitOps maturity** — teams already version-control infrastructure (Terraform, Kubernetes manifests). Runbooks are the last major operational artifact not yet managed as code.
+- **Incident management evolution** — tools like PagerDuty, Incident.io, and FireHydrant have professionalised incident response, but the actual procedures remain in wikis.
+- **Compliance tightening** — SOC 2, ISO 27001, and DORA regulations increasingly require auditable operational procedures. Manual wiki-based processes fail audits.
+- **AI readiness** — structured, executable runbooks are the ideal substrate for AI-assisted operations.
 
 ## 💡 The solution
 
-A **`.runbook`** file is simultaneously:
+> **Documentation and automation are the same file.** When you update the command, you update the
+> explanation in the same commit. They can never drift apart.
+
+A **`.runbook`** file is extended Markdown with typed, fenced code blocks. The frontmatter defines
+metadata, permissions, and approval rules. The Markdown body is the documentation. Specially-typed
+code blocks (`check`, `step`, `rollback`, `wait`) are the executable units.
+
+This means a single file is the document a human reads during an incident **and** the executable
+procedure the system runs. It lives in your Git repo, is reviewed in PRs, and is tested in CI.
 
 - 📄 A **human-readable document** that explains what, why, and how
 - ⚡ An **executable program** with typed steps, preconditions, rollback logic, and environment awareness
