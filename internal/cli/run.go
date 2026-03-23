@@ -38,6 +38,7 @@ func newRunCmd() *cobra.Command {
 		dryRun         bool
 		verbose        bool
 		auditDir       string
+		strict         bool
 	)
 
 	cmd := &cobra.Command{
@@ -86,6 +87,9 @@ local audit log.`,
 					fmt.Fprintf(os.Stderr, "%s cannot open audit log: %v\n", warnPrefix(), err)
 				} else {
 					defer al.Close()
+					for _, w := range al.Warnings {
+						fmt.Fprintf(os.Stderr, "%s %s\n", warnPrefix(), w)
+					}
 				}
 			}
 
@@ -100,6 +104,7 @@ local audit log.`,
 				DryRun:         dryRun,
 				NonInteractive: nonInteractive,
 				Verbose:        verbose,
+				Strict:         strict,
 				Shell:          cfg.Shell,
 				AuditLogger:    al,
 			})
@@ -117,6 +122,7 @@ local audit log.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show the execution plan without running commands")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show detailed step output in the summary")
 	cmd.Flags().StringVar(&auditDir, "audit-dir", "", "path to the audit database (default: ~/.runbook/audit/runbook.db)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "treat shell metacharacter warnings as hard errors (exit code 3)")
 
 	return cmd
 }

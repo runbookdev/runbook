@@ -1,0 +1,36 @@
+---
+name: Step 3 of 5 Fails — Rollback Audit
+version: 1.0.0
+---
+
+# Steps 1-2 succeed and register rollbacks.
+# Step 3 fails, triggering rollback of steps 1-2 in reverse (LIFO) order.
+# Steps 4-5 are never reached.
+
+```step name="setup-infra" rollback="undo-infra"
+echo "step 1: infra ready"
+```
+
+```step name="migrate-db" rollback="undo-migrate"
+echo "step 2: migration done"
+```
+
+```step name="deploy-app"
+echo "step 3: deploy starting" && exit 1
+```
+
+```step name="smoke-test"
+echo "step 4: should not run"
+```
+
+```step name="notify-team"
+echo "step 5: should not run"
+```
+
+```rollback name="undo-infra"
+echo "rollback step 1: infra torn down"
+```
+
+```rollback name="undo-migrate"
+echo "rollback step 2: migration reversed"
+```

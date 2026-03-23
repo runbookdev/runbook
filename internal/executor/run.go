@@ -17,6 +17,9 @@ package executor
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/runbookdev/runbook/internal/ast"
 	"github.com/runbookdev/runbook/internal/audit"
 	"github.com/runbookdev/runbook/internal/parser"
@@ -48,13 +50,14 @@ const (
 type RunStatus int
 
 const (
-	RunSuccess         RunStatus = iota // exit 0
-	RunStepFailed                       // exit 1
-	RunRolledBack                       // exit 2
-	RunValidationError                  // exit 3
-	RunCheckFailed                      // exit 4
-	RunAborted         RunStatus = 10   // exit 10
-	RunInternalError   RunStatus = 20   // exit 20
+	RunSuccess             RunStatus = iota // exit 0
+	RunStepFailed                           // exit 1
+	RunRolledBack                           // exit 2
+	RunValidationError                      // exit 3
+	RunCheckFailed                          // exit 4
+	RunPartiallyRolledBack RunStatus = 5    // exit 5 — rollback ran but some blocks failed
+	RunAborted             RunStatus = 10   // exit 10
+	RunInternalError       RunStatus = 20   // exit 20
 )
 
 func (s RunStatus) String() string {
@@ -69,6 +72,8 @@ func (s RunStatus) String() string {
 		return "validation_error"
 	case RunCheckFailed:
 		return "check_failed"
+	case RunPartiallyRolledBack:
+		return "partially_rolled_back"
 	case RunAborted:
 		return "aborted"
 	case RunInternalError:
@@ -91,6 +96,8 @@ func (s RunStatus) ExitCode() int {
 		return 3
 	case RunCheckFailed:
 		return 4
+	case RunPartiallyRolledBack:
+		return 5
 	case RunAborted:
 		return 10
 	case RunInternalError:
@@ -134,6 +141,10 @@ type RunOptions struct {
 	DryRun bool
 	// NonInteractive skips all confirmation prompts (auto-yes).
 	NonInteractive bool
+	// Strict treats shell metacharacter warnings in resolved variable values as
+	// hard errors, causing the run to exit with RunValidationError (exit code 3).
+	// Intended for CI pipelines where any injection risk should fail the build.
+	Strict bool
 	// Verbose enables debug-level output (variable resolution, timing, commands).
 	Verbose bool
 	// Shell overrides the default /bin/sh.
@@ -152,19 +163,20 @@ type RunOptions struct {
 // runContext holds the shared state for an in-progress execution,
 // allowing the check and step loops to be extracted from Run.
 type runContext struct {
-	ctx            context.Context
-	opts           RunOptions
-	start          time.Time
-	tree           *ast.RunbookAST
-	exec           *StepExecutor
-	rollbackEngine *RollbackEngine
-	rollbackMap    map[string]ast.RollbackNode
-	result         *RunResult
-	sigCh          <-chan SignalAction
-	logStepAudit   func(sr *StepResult, blockType, command string)
-	logDebug       func(format string, args ...any)
-	stderr         io.Writer
-	promptInput    io.Reader
+	ctx              context.Context
+	opts             RunOptions
+	start            time.Time
+	tree             *ast.RunbookAST
+	exec             *StepExecutor
+	rollbackEngine   *RollbackEngine
+	rollbackMap      map[string]ast.RollbackNode
+	result           *RunResult
+	sigCh            <-chan SignalAction
+	logStepAudit     func(sr *StepResult, blockType, command string)
+	logRollbackAudit func(report *RollbackReport)
+	logDebug         func(format string, args ...any)
+	stderr           io.Writer
+	promptInput      io.Reader
 }
 
 // Run orchestrates the full runbook lifecycle:
@@ -186,21 +198,19 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 
 	// --- INIT: Parse ---
 	fmt.Fprintf(stderr, "[runbook] parsing %s\n", opts.FilePath)
-	content, err := os.ReadFile(opts.FilePath)
-	if err != nil {
-		return fail(result, RunInternalError, fmt.Sprintf("%s: %v", opts.FilePath, err), start)
-	}
-
-	tree, err := parser.Parse(opts.FilePath, string(content))
+	tree, err := parser.ParseFile(opts.FilePath)
 	if err != nil {
 		return fail(result, RunInternalError, err.Error(), start)
+	}
+	for _, w := range tree.ParseWarnings {
+		fmt.Fprintf(stderr, "[runbook] warning: %s\n", w)
 	}
 	logDebug("parsed %s: %d checks, %d steps, %d rollbacks, %d waits",
 		opts.FilePath, len(tree.Checks), len(tree.Steps), len(tree.Rollbacks), len(tree.Waits))
 
 	// --- INIT: Validate ---
 	fmt.Fprintf(stderr, "[runbook] validating\n")
-	valErrs := validator.Validate(tree)
+	valErrs := validator.Validate(tree, validator.Options{})
 	for _, ve := range valErrs {
 		if ve.Line > 0 {
 			fmt.Fprintf(stderr, "[runbook] %s:%d: %s: %s\n", opts.FilePath, ve.Line, ve.Severity, ve.Message)
@@ -217,9 +227,26 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 	fmt.Fprintf(stderr, "[runbook] resolving variables (env=%s)\n", opts.Env)
 	logDebug("resolution priority: builtins < .env(%s) < RUNBOOK_* env < CLI vars(%d)",
 		opts.EnvFile, len(opts.Vars))
-	if err := resolver.Resolve(tree, opts.Env, opts.Vars, opts.EnvFile); err != nil {
-		return fail(result, RunInternalError, err.Error(), start)
+	resolveOpts := resolver.Options{
+		NonInteractive: opts.NonInteractive,
+		DryRun:         opts.DryRun,
+		Strict:         opts.Strict,
+		Stderr:         stderr,
+		PromptInput:    promptInput,
 	}
+	if err := resolver.Resolve(tree, opts.Env, opts.Vars, opts.EnvFile, resolveOpts); err != nil {
+		status := RunInternalError
+		var metaErr *resolver.MetacharError
+		if errors.As(err, &metaErr) {
+			status = RunValidationError
+		}
+		return fail(result, status, err.Error(), start)
+	}
+
+	// Redact any secret values that end up in error messages before returning.
+	defer func() {
+		result.Error = audit.Redact(result.Error, tree.ResolvedSecrets)
+	}()
 
 	// --- DRY RUN ---
 	if opts.DryRun {
@@ -232,7 +259,7 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 
 	// --- AUDIT: Start run record ---
 	al := opts.AuditLogger
-	runID := uuid.New().String()
+	runID := newRunID()
 	if al != nil {
 		hostname, _ := os.Hostname()
 		username := ""
@@ -261,7 +288,29 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 			StartedAt: time.Now().Add(-sr.Duration), FinishedAt: time.Now(),
 			ExitCode: sr.ExitCode, Status: sr.Status.String(),
 			Stdout: sr.Stdout, Stderr: sr.Stderr, Command: command,
+			Secrets: tree.ResolvedSecrets,
 		})
+	}
+
+	logRollbackAudit := func(report *RollbackReport) {
+		if al == nil || report == nil {
+			return
+		}
+		for _, entry := range report.Entries {
+			_ = al.LogStep(audit.StepLog{
+				RunID:      runID,
+				StepName:   entry.Name,
+				BlockType:  "rollback",
+				StartedAt:  entry.StartedAt,
+				FinishedAt: entry.FinishedAt,
+				ExitCode:   entry.ExitCode,
+				Status:     entry.Status.String(),
+				Stdout:     entry.Stdout,
+				Stderr:     entry.Stderr,
+				Command:    entry.Command,
+				Secrets:    tree.ResolvedSecrets,
+			})
+		}
 	}
 
 	// Apply global timeout from frontmatter as a parent context.
@@ -282,7 +331,17 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 	workDir := ResolvedDir(opts.FilePath)
 	logDebug("shell=%s workdir=%s", shell, workDir)
 
-	exec := &StepExecutor{Shell: shell, WorkDir: workDir, Env: opts.Vars, Stdout: stdout, Stderr: stderr}
+	exec := &StepExecutor{
+		Shell:            shell,
+		WorkDir:          workDir,
+		Env:              opts.Vars,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		OrphanCheckDelay: 2 * time.Second,
+	}
+	if !opts.NonInteractive {
+		exec.Stdin = os.Stdin
+	}
 
 	rollbackEngine := NewRollbackEngine(exec)
 	rollbackEngine.Output = stderr
@@ -304,7 +363,8 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 		ctx: ctx, opts: opts, start: start, tree: tree,
 		exec: exec, rollbackEngine: rollbackEngine, rollbackMap: rollbackMap,
 		result: result, sigCh: sigCh, logStepAudit: logStepAudit,
-		logDebug: logDebug, stderr: stderr, promptInput: promptInput,
+		logRollbackAudit: logRollbackAudit,
+		logDebug:         logDebug, stderr: stderr, promptInput: promptInput,
 	}
 
 	// --- CHECKING ---
@@ -333,13 +393,15 @@ func (rc *runContext) executeChecks() *RunResult {
 
 	for i, check := range rc.tree.Checks {
 		if action := pollSignal(rc.sigCh); action != nil {
-			return handleSignal(rc.ctx, *action, rc.result, rc.rollbackEngine, rc.start)
+			r := handleSignal(rc.ctx, *action, rc.result, rc.rollbackEngine, rc.start)
+			rc.logRollbackAudit(rc.result.RollbackReport)
+			return r
 		}
 
 		fmt.Fprintf(rc.stderr, "[runbook] check [%d/%d] %q\n", i+1, len(rc.tree.Checks), check.Name)
 		rc.logDebug("check command: %s", indentCommand(check.Command))
 		checkStart := time.Now()
-		sr, err := rc.exec.Run(rc.ctx, "check:"+check.Name, check.Command, 0)
+		sr, err := rc.exec.Run(rc.ctx, "check:"+check.Name, check.Command, 0, 0)
 		if err != nil {
 			return fail(rc.result, RunInternalError,
 				fmt.Sprintf("%s:%d: check %q: %v", rc.opts.FilePath, check.Line, check.Name, err), rc.start)
@@ -362,7 +424,9 @@ func (rc *runContext) executeSteps() *RunResult {
 
 	for i, step := range rc.tree.Steps {
 		if action := pollSignal(rc.sigCh); action != nil {
-			return handleSignal(rc.ctx, *action, rc.result, rc.rollbackEngine, rc.start)
+			r := handleSignal(rc.ctx, *action, rc.result, rc.rollbackEngine, rc.start)
+			rc.logRollbackAudit(rc.result.RollbackReport)
+			return r
 		}
 
 		if r := rc.handleConfirmGate(step); r != nil {
@@ -373,6 +437,7 @@ func (rc *runContext) executeSteps() *RunResult {
 		}
 
 		stepTimeout := parseDuration(step.Timeout)
+		stepGrace := parseDuration(step.KillGrace) // 0 → executor uses defaultGracePeriod
 
 		fmt.Fprintf(rc.stderr, "[runbook] step [%d/%d] %q\n", i+1, len(rc.tree.Steps), step.Name)
 		rc.logDebug("step command: %s", indentCommand(step.Command))
@@ -381,7 +446,7 @@ func (rc *runContext) executeSteps() *RunResult {
 		}
 
 		stepStart := time.Now()
-		sr, err := rc.exec.Run(rc.ctx, step.Name, step.Command, stepTimeout)
+		sr, err := rc.exec.Run(rc.ctx, step.Name, step.Command, stepTimeout, stepGrace)
 		if err != nil {
 			return fail(rc.result, RunInternalError,
 				fmt.Sprintf("%s:%d: step %q: %v", rc.opts.FilePath, step.Line, step.Name, err), rc.start)
@@ -400,17 +465,27 @@ func (rc *runContext) executeSteps() *RunResult {
 			continue
 		}
 
-		// Step failed or timed out — initiate rollback.
+		// Step failed or timed out — show rollback plan (interactive) then execute.
 		fmt.Fprintf(rc.stderr, "[runbook] %s:%d: step %q %s (exit code %d)\n",
 			rc.opts.FilePath, step.Line, step.Name, sr.Status, sr.ExitCode)
+
+		if !rc.opts.NonInteractive && rc.rollbackEngine.Len() > 0 {
+			if !promptRollbackPlan(rc.stderr, rc.promptInput, step.Name, sr.ExitCode,
+				rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets) {
+				// User declined rollback — clear the stack and exit with step failed.
+				rc.rollbackEngine.stack = rc.rollbackEngine.stack[:0]
+				rc.result.Status = RunStepFailed
+				rc.result.Duration = time.Since(rc.start)
+				return rc.result
+			}
+		}
+
 		rc.result.Phase = PhaseRollingBack
 		report := rc.rollbackEngine.Execute(rc.ctx, "step_failure")
+		report.TriggerStep = step.Name
 		rc.result.RollbackReport = report
-		if report.Succeeded > 0 || report.Failed > 0 {
-			rc.result.Status = RunRolledBack
-		} else {
-			rc.result.Status = RunStepFailed
-		}
+		rc.logRollbackAudit(report)
+		rc.result.Status = rollbackRunStatus(report)
 		rc.result.Duration = time.Since(rc.start)
 		return rc.result
 	}
@@ -431,7 +506,7 @@ func (rc *runContext) handleConfirmGate(step ast.StepNode) *RunResult {
 		return nil
 	}
 
-	action := promptConfirm(rc.stderr, rc.promptInput, step.Name, rc.opts.Env)
+	action := promptConfirm(rc.stderr, rc.promptInput, step.Name, rc.opts.Env, step.Command, rc.tree.ResolvedSecrets)
 	switch action {
 	case ConfirmYes:
 		return nil
@@ -439,18 +514,26 @@ func (rc *runContext) handleConfirmGate(step ast.StepNode) *RunResult {
 		fmt.Fprintf(rc.stderr, "[runbook] step %q: skipped by user\n", step.Name)
 		return skipSentinel
 	case ConfirmAbort:
-		return handleSignal(rc.ctx, ActionQuit, rc.result, rc.rollbackEngine, rc.start)
+		r := handleSignal(rc.ctx, ActionQuit, rc.result, rc.rollbackEngine, rc.start)
+		rc.logRollbackAudit(rc.result.RollbackReport)
+		return r
 	default: // ConfirmNo
-		rc.result.Status = RunStepFailed
 		rc.result.Error = fmt.Sprintf("%s:%d: step %q: user declined confirmation", rc.opts.FilePath, step.Line, step.Name)
+		if rc.rollbackEngine.Len() > 0 {
+			if !promptRollbackPlan(rc.stderr, rc.promptInput, step.Name, 0,
+				rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets) {
+				rc.rollbackEngine.stack = rc.rollbackEngine.stack[:0]
+				rc.result.Status = RunStepFailed
+				rc.result.Duration = time.Since(rc.start)
+				return rc.result
+			}
+		}
 		rc.result.Phase = PhaseRollingBack
 		report := rc.rollbackEngine.Execute(rc.ctx, "user_declined")
+		report.TriggerStep = step.Name
 		rc.result.RollbackReport = report
-		if report.Failed > 0 {
-			rc.result.Status = RunStepFailed
-		} else if rc.rollbackEngine.Len() == 0 && report.Succeeded > 0 {
-			rc.result.Status = RunRolledBack
-		}
+		rc.logRollbackAudit(report)
+		rc.result.Status = rollbackRunStatus(report)
 		rc.result.Duration = time.Since(rc.start)
 		return rc.result
 	}
@@ -546,20 +629,83 @@ func confirmMatches(confirm, targetEnv string) bool {
 	return strings.EqualFold(confirm, targetEnv)
 }
 
+// rollbackRunStatus converts a RollbackReport into the appropriate RunStatus.
+// All succeeded → RunRolledBack; any failure/timeout → RunPartiallyRolledBack;
+// nothing ran (empty stack) → RunStepFailed.
+func rollbackRunStatus(report *RollbackReport) RunStatus {
+	if report == nil || (report.Succeeded == 0 && report.Failed == 0) {
+		return RunStepFailed
+	}
+	if report.Failed > 0 {
+		return RunPartiallyRolledBack
+	}
+	return RunRolledBack
+}
+
+// promptRollbackPlan shows the pending rollback commands and asks the user
+// whether to execute them. Returns true if the user confirms, false to skip.
+func promptRollbackPlan(w io.Writer, r io.Reader, failedStep string, exitCode int, plan []RollbackItem, secrets map[string]string) bool {
+	if exitCode != 0 {
+		fmt.Fprintf(w, "\n✗ Step %q failed (exit code %d).\n", failedStep, exitCode)
+	} else {
+		fmt.Fprintf(w, "\n✗ Step %q declined — triggering rollback.\n", failedStep)
+	}
+	fmt.Fprintf(w, "\nRollback plan (most recent first):\n")
+	for i, item := range plan {
+		displayCmd := audit.RedactDisplay(item.Command, secrets)
+		fmt.Fprintf(w, "  %d. %s: %s\n", i+1, item.Name, indentCommand(displayCmd))
+	}
+	fmt.Fprintf(w, "\nExecute rollback? [y]es / [n]o (skip rollback and exit)\n")
+
+	scanner := bufio.NewScanner(r)
+	for {
+		fmt.Fprintf(w, "  Confirm [y/n]: ")
+		if !scanner.Scan() {
+			return true // default yes on EOF / non-interactive pipe
+		}
+		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+		case "y", "yes":
+			return true
+		case "n", "no":
+			return false
+		}
+	}
+}
+
 // promptConfirm displays a confirmation gate and reads the user's response.
-func promptConfirm(w io.Writer, r io.Reader, stepName, env string) ConfirmAction {
+// Secret values in command are replaced with **** in the display. The user may
+// type [r]eveal to see the full command before deciding.
+func promptConfirm(w io.Writer, r io.Reader, stepName, env, command string, secrets map[string]string) ConfirmAction {
+	hasSecrets := len(secrets) > 0
+	displayCmd := audit.RedactDisplay(command, secrets)
+
 	fmt.Fprintf(w, "\n[runbook] step %q requires confirmation for %q\n", stepName, env)
+	fmt.Fprintf(w, "  Command: %s\n", indentCommand(displayCmd))
 	fmt.Fprintf(w, "  [y]es   — execute this step\n")
 	fmt.Fprintf(w, "  [n]o    — skip and rollback\n")
 	fmt.Fprintf(w, "  [s]kip  — skip this step, continue with next\n")
 	fmt.Fprintf(w, "  [a]bort — stop immediately\n")
-	fmt.Fprintf(w, "  Confirm [y/n/s/a]: ")
+	if hasSecrets {
+		fmt.Fprintf(w, "  [r]eveal — show full command\n")
+	}
 
 	scanner := bufio.NewScanner(r)
-	if scanner.Scan() {
-		return parseConfirmAction(scanner.Text())
+	for {
+		if hasSecrets {
+			fmt.Fprintf(w, "  Confirm [y/n/s/a/r]: ")
+		} else {
+			fmt.Fprintf(w, "  Confirm [y/n/s/a]: ")
+		}
+		if !scanner.Scan() {
+			return ConfirmNo
+		}
+		input := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if hasSecrets && (input == "r" || input == "reveal") {
+			fmt.Fprintf(w, "  Full command: %s\n", command)
+			continue
+		}
+		return parseConfirmAction(input)
 	}
-	return ConfirmNo
 }
 
 // parseConfirmAction converts user input to a ConfirmAction.
@@ -578,6 +724,7 @@ func parseConfirmAction(s string) ConfirmAction {
 }
 
 // printDryRun displays the execution plan without running any commands.
+// Secret values in resolved commands are replaced with **** for display.
 func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 	fmt.Fprintf(w, "\n[dry-run] Runbook: %s (v%s)\n", tree.Metadata.Name, tree.Metadata.Version)
 	if env != "" {
@@ -591,7 +738,7 @@ func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 		fmt.Fprintf(w, "\n[dry-run] Checks (%d):\n", len(tree.Checks))
 		for i, c := range tree.Checks {
 			fmt.Fprintf(w, "  %d. %s\n", i+1, c.Name)
-			fmt.Fprintf(w, "     %s\n", indentCommand(c.Command))
+			fmt.Fprintf(w, "     %s\n", indentCommand(audit.RedactDisplay(c.Command, tree.ResolvedSecrets)))
 		}
 	}
 
@@ -616,7 +763,7 @@ func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 				suffix = " (" + strings.Join(extras, ", ") + ")"
 			}
 			fmt.Fprintf(w, "  %d. %s%s\n", i+1, s.Name, suffix)
-			fmt.Fprintf(w, "     %s\n", indentCommand(s.Command))
+			fmt.Fprintf(w, "     %s\n", indentCommand(audit.RedactDisplay(s.Command, tree.ResolvedSecrets)))
 		}
 	}
 
@@ -628,6 +775,17 @@ func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 	}
 
 	fmt.Fprintf(w, "\n[dry-run] plan complete — no commands were executed\n")
+}
+
+// newRunID generates a unique run identifier using crypto/rand.
+// Format: "run_" followed by 8 random hex characters (e.g. "run_a3f1c2d4").
+func newRunID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand is unavailable.
+		return fmt.Sprintf("run_%x", time.Now().UnixNano())
+	}
+	return "run_" + hex.EncodeToString(b[:])
 }
 
 // indentCommand returns the first line of a command, truncated for display.

@@ -20,6 +20,7 @@ package audit
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,11 +30,24 @@ import (
 	_ "github.com/mattn/go-sqlite3" // register sqlite3 driver
 )
 
-// secretPatterns are substrings in variable names that trigger auto-redaction.
-var secretPatterns = []string{"SECRET", "PASSWORD", "TOKEN", "KEY", "CREDENTIAL"}
+// SecretPatterns are substrings in variable names (case-insensitive) that
+// trigger auto-redaction. The list is exported so callers can reference the
+// same set without duplicating it.
+var SecretPatterns = []string{
+	"SECRET", "PASSWORD", "TOKEN", "KEY", "CREDENTIAL",
+	"API_KEY", "APIKEY", "AUTH", "PRIVATE", "PASSPHRASE",
+	"CERT", "CONNECTION_STRING",
+}
 
 // redactedValue is the replacement for sensitive variable values.
 const redactedValue = "[REDACTED]"
+
+// maxOutputBytes is the maximum number of bytes stored for stdout/stderr.
+// Outputs exceeding this limit are truncated before storage.
+const maxOutputBytes = 1 << 20 // 1 MB
+
+// outputTruncatedMarker is appended to truncated outputs.
+const outputTruncatedMarker = "[OUTPUT TRUNCATED AT 1 MB]"
 
 // DefaultDBPath returns the default audit database path: ~/.runbook/audit/runbook.db.
 func DefaultDBPath() (string, error) {
@@ -72,18 +86,35 @@ type StepLog struct {
 	Stdout     string
 	Stderr     string
 	Command    string
+	// Secrets holds the resolved secret variable values used to redact Command,
+	// Stdout, and Stderr before they are persisted. Not stored in the database.
+	Secrets map[string]string
 }
 
 // Logger writes audit records to a SQLite database.
 type Logger struct {
 	db *sql.DB
+	// Warnings holds any security advisory messages produced during Open.
+	// Callers should print these to the user after a successful open.
+	Warnings []string
 }
 
 // Open creates or opens the audit database at the given path. The parent
 // directories are created automatically if they do not exist.
+// Security advisories (permission warnings) are stored in Logger.Warnings.
 func Open(dbPath string) (*Logger, error) {
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+
+	// Note whether the directory and DB file already exist before we create them
+	// so we can apply secure defaults to new files without warning, and warn only
+	// for pre-existing files that have too-open permissions.
+	_, dirStatErr := os.Stat(dir)
+	_, dbStatErr := os.Stat(dbPath)
+	dirIsNew := os.IsNotExist(dirStatErr)
+	dbIsNew := os.IsNotExist(dbStatErr)
+
+	// Create parent directories. New dirs get 0700 (owner-only access).
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating audit directory %s: %w", dir, err)
 	}
 
@@ -97,7 +128,36 @@ func Open(dbPath string) (*Logger, error) {
 		return nil, fmt.Errorf("migrating audit database: %w", err)
 	}
 
-	return &Logger{db: db}, nil
+	l := &Logger{db: db}
+
+	// For newly created DB files, set 0600 silently so secrets are protected.
+	// For pre-existing files with wrong permissions, warn the operator.
+	if dbIsNew {
+		_ = os.Chmod(dbPath, 0o600)
+	} else {
+		if info, err := os.Stat(dbPath); err == nil {
+			if info.Mode().Perm()&^os.FileMode(0o600) != 0 {
+				l.Warnings = append(l.Warnings, fmt.Sprintf(
+					"⚠ audit database %s has permissions %04o; run: chmod 600 %s",
+					dbPath, info.Mode().Perm(), dbPath,
+				))
+			}
+		}
+	}
+
+	// For pre-existing directories with too-open permissions, warn.
+	if !dirIsNew {
+		if info, err := os.Stat(dir); err == nil {
+			if info.Mode().Perm()&0o077 != 0 {
+				l.Warnings = append(l.Warnings, fmt.Sprintf(
+					"⚠ audit directory %s has permissions %04o; run: chmod 700 %s",
+					dir, info.Mode().Perm(), dir,
+				))
+			}
+		}
+	}
+
+	return l, nil
 }
 
 // Close closes the underlying database connection.
@@ -166,7 +226,8 @@ func (l *Logger) StartRun(r RunRecord) error {
 	return nil
 }
 
-// LogStep inserts a step log record. The command field is auto-redacted.
+// LogStep inserts a step log record. Stdout and Stderr are truncated to 1 MB
+// and then redacted using s.Secrets before being persisted.
 func (l *Logger) LogStep(s StepLog) error {
 	_, err := l.db.Exec(`
 		INSERT INTO step_logs (run_id, step_name, block_type, started_at, finished_at, exit_code, status, stdout, stderr, command)
@@ -174,8 +235,10 @@ func (l *Logger) LogStep(s StepLog) error {
 		s.RunID, s.StepName, s.BlockType,
 		s.StartedAt.UTC().Format(time.RFC3339Nano),
 		s.FinishedAt.UTC().Format(time.RFC3339Nano),
-		s.ExitCode, s.Status, s.Stdout, s.Stderr,
-		RedactCommand(s.Command),
+		s.ExitCode, s.Status,
+		Redact(truncateOutput(s.Stdout), s.Secrets),
+		Redact(truncateOutput(s.Stderr), s.Secrets),
+		Redact(s.Command, s.Secrets),
 	)
 	if err != nil {
 		return fmt.Errorf("inserting step log: %w", err)
@@ -347,28 +410,60 @@ func RedactVariables(vars map[string]string) map[string]string {
 	return out
 }
 
-// RedactCommand replaces inline occurrences of common secret patterns in
-// command text. This is a best-effort heuristic: it looks for environment
-// variable references that match the sensitive patterns.
-func RedactCommand(cmd string) string {
-	// We do not attempt to parse the shell; instead we redact the value
-	// portion of any VAR=value or --flag=value patterns where VAR matches.
-	// For now, return as-is — the primary redaction happens at the variable
-	// level via RedactVariables. Commands recorded here use already-resolved
-	// text, so if a variable named DB_PASSWORD was resolved into the command,
-	// the raw password text would be present. A full-coverage approach would
-	// require tracking every resolved secret and scrubbing, which is future
-	// work. The current guarantee: the variables JSON column is always safe.
-	return cmd
+// Redact replaces every occurrence of each secret value in s with [REDACTED].
+// Empty values are skipped to avoid replacing all empty-string matches.
+func Redact(s string, secrets map[string]string) string {
+	for _, v := range secrets {
+		if v == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, v, redactedValue)
+	}
+	return s
 }
 
-// isSensitive checks if a variable name matches any secret pattern.
-func isSensitive(name string) bool {
+// RedactDisplay replaces every occurrence of each secret value in s with ****.
+// Use this for interactive output where the user needs a visual hint that a
+// value has been hidden. Empty values are skipped.
+func RedactDisplay(s string, secrets map[string]string) string {
+	for _, v := range secrets {
+		if v == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, v, "****")
+	}
+	return s
+}
+
+// RedactError returns a new error whose message has all secret values replaced
+// by [REDACTED]. Returns nil when err is nil.
+func RedactError(err error, secrets map[string]string) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(Redact(err.Error(), secrets))
+}
+
+// IsSensitive reports whether name contains any of the SecretPatterns
+// (case-insensitive). Exported so callers can reuse the same check.
+func IsSensitive(name string) bool {
 	upper := strings.ToUpper(name)
-	for _, pat := range secretPatterns {
+	for _, pat := range SecretPatterns {
 		if strings.Contains(upper, pat) {
 			return true
 		}
 	}
 	return false
+}
+
+// isSensitive is the unexported alias kept for internal use.
+func isSensitive(name string) bool { return IsSensitive(name) }
+
+// truncateOutput limits s to maxOutputBytes. If truncated, outputTruncatedMarker
+// is appended so readers know the output was cut.
+func truncateOutput(s string) string {
+	if len(s) <= maxOutputBytes {
+		return s
+	}
+	return s[:maxOutputBytes] + outputTruncatedMarker
 }

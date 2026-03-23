@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,17 +74,28 @@ type StepExecutor struct {
 	Shell string
 	// WorkDir is the working directory for command execution.
 	WorkDir string
+	// TempDir is the directory for temporary script files. Empty = OS default.
+	// Set in tests to use a controlled directory for permission/cleanup checks.
+	TempDir string
 	// Env is additional environment variables injected as RUNBOOK_* vars.
 	Env map[string]string
 	// Stdout is the writer for real-time stdout streaming (default: os.Stdout).
 	Stdout io.Writer
 	// Stderr is the writer for real-time stderr streaming (default: os.Stderr).
 	Stderr io.Writer
+	// Stdin is forwarded to the subprocess. When nil, the subprocess reads
+	// from /dev/null (exec.Cmd default) — safe for non-interactive mode.
+	Stdin io.Reader
+	// OrphanCheckDelay is how long to wait before scanning for orphaned child
+	// processes after a timeout kill. Zero disables orphan detection.
+	// Production code sets this to 2s via run.go.
+	OrphanCheckDelay time.Duration
 }
 
-// Run executes a single step command with the given timeout.
-// If timeout is zero, the step runs without a deadline.
-func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeout time.Duration) (*StepResult, error) {
+// Run executes a single step command with the given timeout and grace period.
+// timeout=0 means no per-step deadline (only the parent context applies).
+// gracePeriod=0 falls back to defaultGracePeriod (10s).
+func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeout, gracePeriod time.Duration) (*StepResult, error) {
 	shell := e.Shell
 	if shell == "" {
 		shell = "/bin/sh"
@@ -96,17 +108,22 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	grace := gracePeriod
+	if grace == 0 {
+		grace = defaultGracePeriod
+	}
 
-	// Write the command to a temp file so it survives shell quoting.
-	tmpFile, err := os.CreateTemp("", "runbook-step-*.sh")
+	// Write the command to a temp script file (mode 0600 — os.CreateTemp default).
+	// The defer removes the file on any return path, including panics.
+	tmpFile, err := os.CreateTemp(e.TempDir, "runbook-step-*.sh")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp script: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := tmpFile.WriteString(command); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return nil, fmt.Errorf("writing temp script: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
@@ -120,6 +137,10 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 
 	// Set up process group so we can kill child processes on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Wire stdin: nil → subprocess reads from /dev/null (non-interactive safe).
+	// Non-nil → forward the provided reader (interactive mode).
+	cmd.Stdin = e.Stdin
 
 	// Build environment: inherit current env + RUNBOOK_* vars.
 	cmd.Env = os.Environ()
@@ -152,8 +173,21 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 		return nil, fmt.Errorf("starting command: %w", err)
 	}
 
-	// Determine the effective deadline from timeout or parent context.
-	var timedOut bool
+	// Verify that Setpgid was honored: the process should be its own group leader.
+	// If not, group-kill will fall back to process-kill automatically in killProcessGroup.
+	pid := cmd.Process.Pid
+	pgid, pgidErr := syscall.Getpgid(pid)
+	pgidVerified := pgidErr == nil && pgid == pid
+	if !pgidVerified {
+		fmt.Fprintf(stderr,
+			"[runbook] warning: step %q: process %d is not its own process group leader (pgid=%d, err=%v); kill will target process only\n",
+			stepName, pid, pgid, pgidErr)
+	}
+
+	// deadlineCtx inherits cancellation from ctx, so a global timeout set
+	// by the caller (via context.WithTimeout on ctx in run.go) will also
+	// trigger this select, appearing as context.Canceled (not DeadlineExceeded).
+	// Only a per-step timeout creates DeadlineExceeded → StatusTimeout.
 	var deadlineCtx context.Context
 	var deadlineCancel context.CancelFunc
 	if timeout > 0 {
@@ -163,10 +197,11 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 	}
 	defer deadlineCancel()
 
-	// Monitor for timeout/cancellation in a separate goroutine.
+	// Stream output and wait in a dedicated goroutine. It is the sole owner
+	// of cmd.Wait() — killProcessGroup must NOT call cmd.Process.Wait() to
+	// avoid the ECHILD race.
 	waitDone := make(chan error, 1)
 	go func() {
-		// Stream output in the foreground before waiting.
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -183,17 +218,21 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 
 	select {
 	case waitErr := <-waitDone:
-		duration := time.Since(start)
-		return buildResult(stepName, waitErr, &stdoutBuf, &stderrBuf, duration, false)
+		return buildResult(stepName, waitErr, &stdoutBuf, &stderrBuf, time.Since(start), false)
 
 	case <-deadlineCtx.Done():
-		timedOut = deadlineCtx.Err() == context.DeadlineExceeded
-		// Kill the entire process group: SIGTERM → grace → SIGKILL.
-		killProcessGroup(cmd, defaultGracePeriod)
-		// Drain the wait channel so goroutine can exit.
+		timedOut := deadlineCtx.Err() == context.DeadlineExceeded
+		killProcessGroup(cmd, grace, pgidVerified, stderr, stepName)
+		// Start orphan check asynchronously so it does not delay the return.
+		if e.OrphanCheckDelay > 0 {
+			go func() {
+				time.Sleep(e.OrphanCheckDelay)
+				checkOrphans(pid, stepName, stderr)
+			}()
+		}
+		// Wait for the streaming goroutine to finish draining pipes after kill.
 		waitErr := <-waitDone
-		duration := time.Since(start)
-		return buildResult(stepName, waitErr, &stdoutBuf, &stderrBuf, duration, timedOut)
+		return buildResult(stepName, waitErr, &stdoutBuf, &stderrBuf, time.Since(start), timedOut)
 	}
 }
 
@@ -234,34 +273,68 @@ func buildResult(stepName string, waitErr error, stdoutBuf, stderrBuf *limitedBu
 	return nil, fmt.Errorf("executing step %q: %w", stepName, waitErr)
 }
 
-// killProcessGroup sends SIGTERM to the process group, waits the grace period,
-// then sends SIGKILL if the process is still running.
-func killProcessGroup(cmd *exec.Cmd, grace time.Duration) {
+// killProcessGroup sends SIGTERM to the process group (falling back to the
+// process itself if group operations fail), waits up to grace for the process
+// to exit (using kill-0 polling to avoid racing with cmd.Wait()), then
+// unconditionally sends SIGKILL if the process is still alive.
+func killProcessGroup(cmd *exec.Cmd, grace time.Duration, pgidVerified bool, w io.Writer, stepName string) {
 	if cmd.Process == nil {
 		return
 	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		return
+
+	pid := cmd.Process.Pid
+	pgid, pgidErr := syscall.Getpgid(pid)
+	groupKillOK := pgidVerified && pgidErr == nil
+
+	// Send SIGTERM.
+	if groupKillOK {
+		if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+			fmt.Fprintf(w, "[runbook] warning: step %q: SIGTERM to process group -%d failed (%v); killing process %d directly\n",
+				stepName, pgid, err, pid)
+			groupKillOK = false
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+		}
+	} else {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
 	}
 
-	// Send SIGTERM to the process group (negative PID).
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-
-	// Wait for the grace period, then SIGKILL.
-	done := make(chan struct{})
-	go func() {
-		// Process may already be waited on; ignore errors.
-		_, _ = cmd.Process.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return
-	case <-time.After(grace):
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	// Poll with kill-0 during the grace period. This detects process exit without
+	// calling Wait (which is owned solely by the streaming goroutine).
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			// Process is gone — SIGTERM was sufficient; no SIGKILL needed.
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+
+	// Grace period elapsed — send SIGKILL unconditionally.
+	if groupKillOK {
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			fmt.Fprintf(w, "[runbook] warning: step %q: SIGKILL to process group -%d failed (%v); killing process %d directly\n",
+				stepName, pgid, err, pid)
+			_ = cmd.Process.Kill()
+		}
+	} else {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// checkOrphans looks for processes whose PPID matches parentPID and logs a
+// warning if any are found. Called asynchronously after a kill.
+func checkOrphans(parentPID int, stepName string, w io.Writer) {
+	orphans := findOrphans(parentPID)
+	if len(orphans) == 0 {
+		return
+	}
+	pids := make([]string, len(orphans))
+	for i, p := range orphans {
+		pids[i] = strconv.Itoa(p)
+	}
+	fmt.Fprintf(w,
+		"⚠ Warning: step %q was killed but left %d orphaned processes. PIDs: [%s]. Consider adding 'exec' prefix to your commands.\n",
+		stepName, len(orphans), strings.Join(pids, ", "))
 }
 
 // newlineByte avoids allocating []byte("\n") on every iteration.
@@ -273,9 +346,7 @@ func streamLines(r io.Reader, prefix io.Writer, buf *limitedBuffer) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		// Write to the prefixed terminal output.
 		_, _ = prefix.Write(line)
-		// Write to the capture buffer.
 		buf.Write(line)
 		buf.Write(newlineByte)
 	}
@@ -285,7 +356,7 @@ func streamLines(r io.Reader, prefix io.Writer, buf *limitedBuffer) {
 type prefixWriter struct {
 	prefix  []byte
 	w       io.Writer
-	scratch []byte // reusable buffer to reduce per-line allocations
+	scratch []byte
 }
 
 func newPrefixWriter(stepName string, w io.Writer) *prefixWriter {
@@ -296,8 +367,6 @@ func newPrefixWriter(stepName string, w io.Writer) *prefixWriter {
 }
 
 func (p *prefixWriter) Write(data []byte) (int, error) {
-	// Write prefix + data + newline as a single write to avoid interleaving.
-	// Reuse the scratch buffer when possible to reduce allocations.
 	needed := len(p.prefix) + len(data) + 1
 	buf := p.scratch
 	if cap(buf) < needed {
@@ -308,7 +377,7 @@ func (p *prefixWriter) Write(data []byte) (int, error) {
 	buf = append(buf, p.prefix...)
 	buf = append(buf, data...)
 	buf = append(buf, '\n')
-	p.scratch = buf // keep for reuse
+	p.scratch = buf
 	_, err := p.w.Write(buf)
 	if err != nil {
 		return 0, err
@@ -344,7 +413,7 @@ func (b *limitedBuffer) String() string {
 	return b.buf.String()
 }
 
-// resolvedDir returns the absolute directory of the given file path.
+// ResolvedDir returns the absolute directory of the given file path.
 func ResolvedDir(filePath string) string {
 	if filePath == "" {
 		return ""

@@ -133,6 +133,11 @@ runbook history
 - **Per-step timeouts** — `SIGTERM` → 10s grace → `SIGKILL`, including child processes via process groups
 - **Global timeout** — set `timeout: 30m` in frontmatter to cap total execution time
 - **Environment filtering** — steps tagged with `env: [staging]` skip in production
+- **Parser hardening** — files are rejected if they exceed 1 MB, contain non-UTF-8 bytes, define more than 1000 blocks, include unknown frontmatter fields, or have frontmatter larger than 64 KB
+- **Validator security rules** — static analysis catches credential patterns in commands, plain-HTTP `wget` fetches, pipe-to-shell patterns, and `.env` files not listed in `.gitignore`
+- **Secure temp files** — generated script files are created with `0600` permissions and cleaned up after execution, even on timeout or kill
+- **Root user warning** — a warning is emitted when the executor detects it is running as root
+- **`.env` permission checks** — `runbook doctor` warns when a `.env` file is world-readable (not `0600`)
 
 ### 🔄 Automatic rollback
 
@@ -227,7 +232,10 @@ runbook history              Query the audit log
   --run-id <id>              Show details for a specific run
   --limit <n>                Number of recent runs (default: 20)
 
-runbook version              Print version, commit, and build date
+runbook doctor [file]        Check the health of your runbook installation
+  --audit-dir <path>         Path to the audit database to check
+
+runbook version              Print version, commit, build date, Go version, and platform
 ```
 
 ### 🔢 Exit codes

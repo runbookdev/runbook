@@ -58,6 +58,9 @@ Use --run-id to show details for a specific run.`,
 				return fmt.Errorf("opening audit log: %w", err)
 			}
 			defer al.Close()
+			for _, w := range al.Warnings {
+				fmt.Fprintf(os.Stderr, "[warning] %s\n", w)
+			}
 
 			if runID != "" {
 				return showRunDetail(al, runID)

@@ -22,47 +22,66 @@ import (
 	"time"
 )
 
+// defaultRollbackTimeout is the per-block timeout enforced during rollback
+// execution. A hanging rollback is as dangerous as a hanging step.
+const defaultRollbackTimeout = 5 * time.Minute
+
 // RollbackStatus represents the outcome of a single rollback execution.
 type RollbackStatus int
 
 const (
 	RollbackSuccess RollbackStatus = iota
 	RollbackFailed
+	RollbackTimedOut
 )
 
 func (s RollbackStatus) String() string {
-	if s == RollbackSuccess {
+	switch s {
+	case RollbackSuccess:
 		return "success"
+	case RollbackTimedOut:
+		return "timeout"
+	default:
+		return "failed"
 	}
-	return "failed"
 }
 
 // RollbackEntry records the outcome of a single rollback block execution.
 type RollbackEntry struct {
-	Name     string
-	Status   RollbackStatus
-	Error    string
-	Duration time.Duration
+	Name       string
+	Command    string
+	Status     RollbackStatus
+	Error      string
+	Duration   time.Duration
+	StartedAt  time.Time
+	FinishedAt time.Time
+	ExitCode   int
+	Stdout     string
+	Stderr     string
 }
 
 // RollbackReport summarizes the full rollback pass.
 type RollbackReport struct {
-	Entries   []RollbackEntry
-	Trigger   string // "step_failure", "user_abort", or "signal"
-	Succeeded int
-	Failed    int
+	Entries       []RollbackEntry
+	Trigger       string // "step_failure", "user_abort", "user_declined"
+	TriggerStep   string // name of the step that caused rollback (empty for user_abort)
+	TotalDuration time.Duration
+	Succeeded     int
+	Failed        int
+	TimedOut      int
 }
 
-// rollbackItem is a single entry pushed onto the LIFO stack.
-type rollbackItem struct {
-	name    string
-	command string
+// RollbackItem is a single entry on the LIFO rollback stack.
+// It is exported so that callers can inspect the Plan without reflection.
+type RollbackItem struct {
+	Name    string
+	Command string
 }
 
 // RollbackEngine maintains a LIFO stack of rollback blocks and executes
 // them in reverse order when triggered.
 type RollbackEngine struct {
-	stack    []rollbackItem
+	stack    []RollbackItem
 	executor *StepExecutor
 	// Output is where rollback status messages are written (default: os.Stderr).
 	Output io.Writer
@@ -79,7 +98,7 @@ func NewRollbackEngine(executor *StepExecutor) *RollbackEngine {
 // Push adds a rollback block to the top of the LIFO stack.
 // Call this after a step succeeds and has a rollback attribute.
 func (r *RollbackEngine) Push(name, command string) {
-	r.stack = append(r.stack, rollbackItem{name: name, command: command})
+	r.stack = append(r.stack, RollbackItem{Name: name, Command: command})
 }
 
 // Len returns the number of rollback blocks on the stack.
@@ -87,17 +106,35 @@ func (r *RollbackEngine) Len() int {
 	return len(r.stack)
 }
 
-// Execute pops the rollback stack in reverse order, running each block.
-// If a rollback block fails, the failure is recorded and execution continues
-// with remaining rollbacks (best-effort). The trigger string describes why
-// rollback was initiated (e.g. "step_failure", "user_abort").
+// Plan returns the rollback blocks in the order they would execute
+// (LIFO: last pushed first). The returned slice is a copy; mutations do not
+// affect the engine's internal stack.
+func (r *RollbackEngine) Plan() []RollbackItem {
+	n := len(r.stack)
+	if n == 0 {
+		return nil
+	}
+	out := make([]RollbackItem, n)
+	for i, item := range r.stack {
+		out[n-1-i] = item // reverse to match execution order
+	}
+	return out
+}
+
+// Execute pops the rollback stack in reverse order, running each block with
+// a 5-minute timeout. If a block fails or times out the failure is recorded
+// and execution continues with remaining rollbacks (best-effort). The trigger
+// string describes why rollback was initiated.
 func (r *RollbackEngine) Execute(ctx context.Context, trigger string) *RollbackReport {
 	out := r.Output
 	if out == nil {
 		out = os.Stderr
 	}
 
-	report := &RollbackReport{Trigger: trigger}
+	report := &RollbackReport{
+		Trigger: trigger,
+		Entries: make([]RollbackEntry, 0, len(r.stack)), // pre-allocate: stack size is the upper bound
+	}
 
 	if len(r.stack) == 0 {
 		fmt.Fprintf(out, "[rollback] no rollback blocks to execute\n")
@@ -105,41 +142,63 @@ func (r *RollbackEngine) Execute(ctx context.Context, trigger string) *RollbackR
 	}
 
 	fmt.Fprintf(out, "[rollback] starting rollback (%d blocks, trigger: %s)\n", len(r.stack), trigger)
+	totalStart := time.Now()
 
 	// Pop in LIFO order (last pushed = first executed).
 	for i := len(r.stack) - 1; i >= 0; i-- {
 		item := r.stack[i]
-		fmt.Fprintf(out, "[rollback] executing %q (%d of %d)\n", item.name, len(r.stack)-i, len(r.stack))
+		fmt.Fprintf(out, "[rollback] executing %q (%d of %d)\n", item.Name, len(r.stack)-i, len(r.stack))
 
-		result, err := r.executor.Run(ctx, "rollback:"+item.name, item.command, 0)
+		blockStart := time.Now()
+		result, err := r.executor.Run(ctx, "rollback:"+item.Name, item.Command, defaultRollbackTimeout, 0)
+		blockEnd := time.Now()
 
-		entry := RollbackEntry{Name: item.name}
+		entry := RollbackEntry{
+			Name:       item.Name,
+			Command:    item.Command,
+			StartedAt:  blockStart,
+			FinishedAt: blockEnd,
+		}
 
 		if err != nil {
 			entry.Status = RollbackFailed
 			entry.Error = fmt.Sprintf("execution error: %v", err)
+			entry.Duration = blockEnd.Sub(blockStart)
 			report.Failed++
-			fmt.Fprintf(out, "[rollback] %q failed: %s\n", item.name, entry.Error)
+			fmt.Fprintf(out, "[rollback] %q failed: %s\n", item.Name, entry.Error)
 		} else {
 			entry.Duration = result.Duration
-			if result.Status == StatusSuccess {
+			entry.ExitCode = result.ExitCode
+			entry.Stdout = result.Stdout
+			entry.Stderr = result.Stderr
+			switch result.Status {
+			case StatusSuccess:
 				entry.Status = RollbackSuccess
 				report.Succeeded++
-				fmt.Fprintf(out, "[rollback] %q succeeded (%s)\n", item.name, result.Duration)
-			} else {
+				fmt.Fprintf(out, "[rollback] %q succeeded (%s)\n", item.Name, result.Duration.Round(time.Millisecond))
+			case StatusTimeout:
+				entry.Status = RollbackTimedOut
+				entry.Error = fmt.Sprintf("timed out after %s", defaultRollbackTimeout)
+				report.TimedOut++
+				report.Failed++
+				fmt.Fprintf(out, "[rollback] %q timed out after %s\n", item.Name, defaultRollbackTimeout)
+			default:
 				entry.Status = RollbackFailed
 				entry.Error = fmt.Sprintf("exit code %d", result.ExitCode)
 				report.Failed++
-				fmt.Fprintf(out, "[rollback] %q failed: exit code %d\n", item.name, result.ExitCode)
+				fmt.Fprintf(out, "[rollback] %q failed: exit code %d\n", item.Name, result.ExitCode)
 			}
 		}
 
 		report.Entries = append(report.Entries, entry)
 	}
 
+	report.TotalDuration = time.Since(totalStart)
+
 	// Clear the stack after execution.
 	r.stack = r.stack[:0]
 
-	fmt.Fprintf(out, "[rollback] complete: %d succeeded, %d failed\n", report.Succeeded, report.Failed)
+	fmt.Fprintf(out, "[rollback] complete: %d succeeded, %d failed (total %s)\n",
+		report.Succeeded, report.Failed, report.TotalDuration.Round(time.Millisecond))
 	return report
 }
