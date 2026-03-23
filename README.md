@@ -191,7 +191,7 @@ Full documentation is in the [`docs`](docs/) folder:
 |                                                |                                                                     |
 |------------------------------------------------|---------------------------------------------------------------------|
 | [Getting started](docs/getting-started.md)     | Install, scaffold, and run your first runbook                       |
-| [File format](docs/FORMAT.md)                  | Frontmatter, block types, and syntax reference                      |
+| [File format](docs/format.md)                  | Frontmatter, block types, and syntax reference                      |
 | [CLI reference](docs/cli-reference.md)         | All commands, flags, and exit codes                                 |
 | [Shell integration](docs/shell-integration.md) | Tab completion, `rb` alias, `runbook-detect`, and prompt indicator  |
 | [Project detection](docs/detect.md)            | How project types, environments, and tool availability are detected |
