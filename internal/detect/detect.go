@@ -116,7 +116,7 @@ type RunbookInfo struct {
 	Environments []string // value of the environments: frontmatter field; nil when absent
 }
 
-// ToolReport summarises required-tool availability for a set of .runbook files.
+// ToolReport summarizes required-tool availability for a set of .runbook files.
 // It is produced by [CheckTools] and embedded in [ProjectInfo.Tools].
 // All three slices are always non-nil (never JSON-encoded as null).
 type ToolReport struct {
@@ -141,7 +141,7 @@ var projectTypeNames = map[string]string{
 	"unknown":        "unknown",
 }
 
-// DetectProject scans dir and returns a [ProjectInfo] summarising the
+// DetectProject scans dir and returns a [ProjectInfo] summarizing the
 // project type, discovered .runbook files, declared environments, and
 // required-tool availability.
 //

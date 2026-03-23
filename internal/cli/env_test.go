@@ -40,7 +40,7 @@ func runEnvCmd(t *testing.T, args ...string) (string, error) {
 
 func writeTmpRunbook(t *testing.T, dir, name, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
@@ -49,7 +49,7 @@ func writeTmpRunbook(t *testing.T, dir, name, content string) {
 
 func TestEnvHumanShowsProjectType(t *testing.T) {
 	d := t.TempDir()
-	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +102,7 @@ environments:
 
 func TestEnvJSONStructure(t *testing.T) {
 	d := t.TempDir()
-	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	writeTmpRunbook(t, d, "deploy.runbook", `---
