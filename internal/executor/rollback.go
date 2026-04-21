@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -80,7 +81,12 @@ type RollbackItem struct {
 
 // RollbackEngine maintains a LIFO stack of rollback blocks and executes
 // them in reverse order when triggered.
+//
+// Push is safe to call from multiple goroutines concurrently (the DAG
+// executor may push from parallel step workers). Execute must only be
+// called once, after all workers have drained.
 type RollbackEngine struct {
+	mu       sync.Mutex
 	stack    []RollbackItem
 	executor *StepExecutor
 	// Output is where rollback status messages are written (default: os.Stderr).
@@ -98,11 +104,15 @@ func NewRollbackEngine(executor *StepExecutor) *RollbackEngine {
 // Push adds a rollback block to the top of the LIFO stack.
 // Call this after a step succeeds and has a rollback attribute.
 func (r *RollbackEngine) Push(name, command string) {
+	r.mu.Lock()
 	r.stack = append(r.stack, RollbackItem{Name: name, Command: command})
+	r.mu.Unlock()
 }
 
 // Len returns the number of rollback blocks on the stack.
 func (r *RollbackEngine) Len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return len(r.stack)
 }
 
@@ -110,6 +120,8 @@ func (r *RollbackEngine) Len() int {
 // (LIFO: last pushed first). The returned slice is a copy; mutations do not
 // affect the engine's internal stack.
 func (r *RollbackEngine) Plan() []RollbackItem {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	n := len(r.stack)
 	if n == 0 {
 		return nil
@@ -121,33 +133,51 @@ func (r *RollbackEngine) Plan() []RollbackItem {
 	return out
 }
 
+// clearStack empties the stack without executing rollbacks. Used when the
+// user declines a rollback plan. Safe for concurrent use.
+func (r *RollbackEngine) clearStack() {
+	r.mu.Lock()
+	r.stack = r.stack[:0]
+	r.mu.Unlock()
+}
+
 // Execute pops the rollback stack in reverse order, running each block with
 // a 5-minute timeout. If a block fails or times out the failure is recorded
 // and execution continues with remaining rollbacks (best-effort). The trigger
 // string describes why rollback was initiated.
+//
+// All concurrent Push calls must have completed before Execute is invoked.
 func (r *RollbackEngine) Execute(ctx context.Context, trigger string) *RollbackReport {
 	out := r.Output
 	if out == nil {
 		out = os.Stderr
 	}
 
+	// Snapshot and clear the stack under the lock. After this point Push
+	// would reopen the stack, but callers are expected to have drained
+	// their workers already.
+	r.mu.Lock()
+	stack := append([]RollbackItem(nil), r.stack...)
+	r.stack = r.stack[:0]
+	r.mu.Unlock()
+
 	report := &RollbackReport{
 		Trigger: trigger,
-		Entries: make([]RollbackEntry, 0, len(r.stack)), // pre-allocate: stack size is the upper bound
+		Entries: make([]RollbackEntry, 0, len(stack)),
 	}
 
-	if len(r.stack) == 0 {
+	if len(stack) == 0 {
 		fmt.Fprintf(out, "[rollback] no rollback blocks to execute\n")
 		return report
 	}
 
-	fmt.Fprintf(out, "[rollback] starting rollback (%d blocks, trigger: %s)\n", len(r.stack), trigger)
+	fmt.Fprintf(out, "[rollback] starting rollback (%d blocks, trigger: %s)\n", len(stack), trigger)
 	totalStart := time.Now()
 
 	// Pop in LIFO order (last pushed = first executed).
-	for i := len(r.stack) - 1; i >= 0; i-- {
-		item := r.stack[i]
-		fmt.Fprintf(out, "[rollback] executing %q (%d of %d)\n", item.Name, len(r.stack)-i, len(r.stack))
+	for i := len(stack) - 1; i >= 0; i-- {
+		item := stack[i]
+		fmt.Fprintf(out, "[rollback] executing %q (%d of %d)\n", item.Name, len(stack)-i, len(stack))
 
 		blockStart := time.Now()
 		result, err := r.executor.Run(ctx, "rollback:"+item.Name, item.Command, defaultRollbackTimeout, 0)
@@ -194,9 +224,6 @@ func (r *RollbackEngine) Execute(ctx context.Context, trigger string) *RollbackR
 	}
 
 	report.TotalDuration = time.Since(totalStart)
-
-	// Clear the stack after execution.
-	r.stack = r.stack[:0]
 
 	fmt.Fprintf(out, "[rollback] complete: %d succeeded, %d failed (total %s)\n",
 		report.Succeeded, report.Failed, report.TotalDuration.Round(time.Millisecond))

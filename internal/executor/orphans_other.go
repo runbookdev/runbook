@@ -31,7 +31,7 @@ func findOrphans(parentPID int) []int {
 	}
 	target := strconv.Itoa(parentPID)
 	var result []int
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue

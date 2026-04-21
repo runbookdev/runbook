@@ -18,6 +18,7 @@ runbook run <file> [flags]
 | `--verbose`          | Show debug-level details: commands, timing, variable values                 |
 | `--audit-dir <path>` | Custom path for the audit database (default: `~/.runbook/audit/runbook.db`) |
 | `--no-color`         | Disable colored terminal output                                             |
+| `--max-parallel <n>` | Maximum steps the DAG scheduler runs concurrently (default `0`/`1` = sequential; frontmatter `max_parallel` takes precedence when set) |
 
 **Examples:**
 
@@ -38,6 +39,9 @@ runbook run deploy.runbook --env production --non-interactive
 
 # Preview only
 runbook run deploy.runbook --env staging --dry-run
+
+# Run independent branches in parallel (up to 4 at once)
+runbook run deploy.runbook --env staging --max-parallel 4
 ```
 
 ---

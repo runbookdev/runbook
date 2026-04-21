@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -538,13 +539,7 @@ func TestFindOrphans(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	orphans := findOrphans(os.Getpid())
-	found := false
-	for _, p := range orphans {
-		if p == childPID {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(orphans, childPID)
 	if !found {
 		t.Errorf("expected child PID %d in findOrphans(%d) result %v",
 			childPID, os.Getpid(), orphans)

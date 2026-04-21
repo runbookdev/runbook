@@ -157,7 +157,7 @@ func showRunDetail(al *audit.Logger, runID string) error {
 			fmt.Fprintf(os.Stdout, "  [%s] %s %s %s\n",
 				s.BlockType, s.StepName, status, dim.Sprintf("(%s)", duration))
 			if s.Stderr != "" {
-				for _, line := range strings.Split(strings.TrimSpace(s.Stderr), "\n") {
+				for line := range strings.SplitSeq(strings.TrimSpace(s.Stderr), "\n") {
 					dim.Fprintf(os.Stdout, "    %s\n", line)
 				}
 			}

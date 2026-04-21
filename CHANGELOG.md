@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **DAG scheduler with parallel step execution** (`internal/dag`) — independent branches of the `depends_on` graph run concurrently when opted into via the new `max_parallel` frontmatter field or the `--max-parallel` CLI flag. Builds the graph with Kahn's algorithm, detects cycles at parse time (validator rule `v21`), and preserves document-order sequential behaviour when `max_parallel <= 1` (default)
+- **Multi-parent `depends_on`** — a step may now list comma-separated parents (e.g. `depends_on="a, b, c"`). The joining step runs only after all named parents succeed
+- **Dry-run DAG layer view** — `runbook dry-run` now groups steps by topological layer when parallelism is enabled, showing which step groups will run concurrently
+- Rollback engine push is now thread-safe; in-flight successful siblings are still rolled back when a parallel sibling fails
+
 ## 2026-03-23
 
 ### Added

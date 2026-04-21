@@ -1,0 +1,23 @@
+---
+name: DAG Confirm Parallel
+version: 1.0.0
+max_parallel: 2
+---
+
+# DAG Confirm Parallel
+
+Two independent steps that each open a confirmation gate. When the
+scheduler dispatches them concurrently, the prompt mutex must
+serialise the two prompts so their stderr output does not interleave.
+
+```step name="alpha"
+  confirm: always
+---
+echo "alpha ran"
+```
+
+```step name="beta"
+  confirm: always
+---
+echo "beta ran"
+```

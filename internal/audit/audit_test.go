@@ -816,10 +816,7 @@ func TestConcurrentWrites(t *testing.T) {
 	errc := make(chan error, 2*writesPerGoroutine)
 
 	for _, runID := range []string{"run-a", "run-b"} {
-		runID := runID
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range writesPerGoroutine {
 				err := l.LogStep(StepLog{
 					RunID:      runID,
@@ -833,7 +830,7 @@ func TestConcurrentWrites(t *testing.T) {
 					errc <- fmt.Errorf("%s step %d: %w", runID, i, err)
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

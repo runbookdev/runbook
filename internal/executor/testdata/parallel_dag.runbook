@@ -1,0 +1,30 @@
+---
+name: Parallel DAG
+version: 1.0.0
+max_parallel: 3
+---
+
+# Parallel DAG
+
+Three independent branches that run in parallel, then a final step that
+joins them.
+
+```step name="root"
+echo "root"
+```
+
+```step name="branch-a" depends_on="root"
+sleep 0.2; echo "branch-a done"
+```
+
+```step name="branch-b" depends_on="root"
+sleep 0.2; echo "branch-b done"
+```
+
+```step name="branch-c" depends_on="root"
+sleep 0.2; echo "branch-c done"
+```
+
+```step name="join" depends_on="branch-a, branch-b, branch-c"
+echo "join"
+```

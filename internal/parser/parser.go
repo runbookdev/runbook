@@ -145,13 +145,13 @@ func extractFrontmatter(content string) (frontmatter, body string, err error) {
 		return "", body, nil
 	}
 
-	closeIdx := strings.Index(rest, "\n---")
-	if closeIdx < 0 {
+	before, after, ok := strings.Cut(rest, "\n---")
+	if !ok {
 		return "", "", fmt.Errorf("line 1: unclosed frontmatter: missing closing ---")
 	}
 
-	frontmatter = rest[:closeIdx]
-	body = rest[closeIdx+4:] // skip \n---
+	frontmatter = before
+	body = after // skip \n---
 	return frontmatter, body, nil
 }
 
@@ -300,10 +300,10 @@ func buildNode(filePath, blockType string, attrs map[string]string, content stri
 // text after is the command. Otherwise the entire body is the command.
 func splitBlockContent(content string) (command, meta string) {
 	// Fast path: find the separator without splitting into lines.
-	idx := strings.Index(content, "\n---\n")
-	if idx >= 0 {
-		meta = content[:idx]
-		command = strings.TrimSpace(content[idx+5:])
+	before, after, ok := strings.Cut(content, "\n---\n")
+	if ok {
+		meta = before
+		command = strings.TrimSpace(after)
 		return command, meta
 	}
 	// Handle trailing "---" at end of content (no trailing newline).
@@ -319,7 +319,7 @@ func applyStepMeta(node *ast.StepNode, meta string) {
 	if meta == "" {
 		return
 	}
-	for _, line := range strings.Split(meta, "\n") {
+	for line := range strings.SplitSeq(meta, "\n") {
 		key, value := parseMetaLine(line)
 		switch key {
 		case "timeout":
@@ -339,7 +339,7 @@ func applyWaitMeta(node *ast.WaitNode, meta string) {
 	if meta == "" {
 		return
 	}
-	for _, line := range strings.Split(meta, "\n") {
+	for line := range strings.SplitSeq(meta, "\n") {
 		key, value := parseMetaLine(line)
 		switch key {
 		case "duration":

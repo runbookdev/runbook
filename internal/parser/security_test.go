@@ -134,7 +134,7 @@ func TestT3_TooManyBlocksRejected(t *testing.T) {
 func TestT3_ExactlyMaxBlocksAccepted(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("---\nname: test\nversion: 1.0.0\n---\n\n")
-	for i := 0; i < maxBlocks; i++ {
+	for i := range maxBlocks {
 		fmt.Fprintf(&b, "```step name=\"s%d\"\necho %d\n```\n\n", i, i)
 	}
 

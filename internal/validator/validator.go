@@ -16,12 +16,14 @@ package validator
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	rbast "github.com/runbookdev/runbook/internal/ast"
+	"github.com/runbookdev/runbook/internal/dag"
 )
 
 // Severity indicates whether a validation issue is an error or warning.
@@ -100,6 +103,8 @@ func Validate(ast *rbast.RunbookAST, opts Options) []ValidationError {
 	errs = append(errs, v18CurlInsecure(ast, opts)...)
 	errs = append(errs, v19WgetInsecure(ast, opts)...)
 	errs = append(errs, v20PipeToShell(ast, opts)...)
+	errs = append(errs, v21DependsOnCycles(ast)...)
+	errs = append(errs, v22MaxParallel(ast)...)
 
 	return errs
 }
@@ -361,10 +366,8 @@ func v8RollbackCycles(ast *rbast.RunbookAST) []ValidationError {
 		}
 		visited[name] = true
 		onStack[name] = true
-		for _, neighbor := range graph[name] {
-			if dfs(neighbor) {
-				return true
-			}
+		if slices.ContainsFunc(graph[name], dfs) {
+			return true
 		}
 		onStack[name] = false
 		return false
@@ -411,7 +414,7 @@ func v8RollbackCycles(ast *rbast.RunbookAST) []ValidationError {
 // rollbackCommandMentions reports whether cmd contains name as a standalone
 // shell token (i.e. not as a substring of a longer word).
 func rollbackCommandMentions(cmd, name string) bool {
-	for _, field := range strings.Fields(cmd) {
+	for field := range strings.FieldsSeq(cmd) {
 		// Strip surrounding shell punctuation.
 		token := strings.Trim(field, `"';,|&()<>{}[]!`)
 		if token == name {
@@ -422,6 +425,8 @@ func rollbackCommandMentions(cmd, name string) bool {
 }
 
 // v9DependsOnRefs warns if depends_on references a non-existent step.
+// depends_on may be a single name or a comma-separated list of names —
+// each is validated independently.
 func v9DependsOnRefs(ast *rbast.RunbookAST) []ValidationError {
 	stepNames := make(map[string]bool)
 	for _, s := range ast.Steps {
@@ -433,9 +438,12 @@ func v9DependsOnRefs(ast *rbast.RunbookAST) []ValidationError {
 		if s.DependsOn == "" {
 			continue
 		}
-		if !stepNames[s.DependsOn] {
-			msg := fmt.Sprintf("step %q depends_on non-existent step %q", s.Name, s.DependsOn)
-			if suggestion := suggestName(s.DependsOn, stepNames); suggestion != "" {
+		for _, dep := range splitDeps(s.DependsOn) {
+			if stepNames[dep] {
+				continue
+			}
+			msg := fmt.Sprintf("step %q depends_on non-existent step %q", s.Name, dep)
+			if suggestion := suggestName(dep, stepNames); suggestion != "" {
 				msg += fmt.Sprintf("; did you mean %q?", suggestion)
 			}
 			errs = append(errs, ValidationError{
@@ -446,6 +454,23 @@ func v9DependsOnRefs(ast *rbast.RunbookAST) []ValidationError {
 		}
 	}
 	return errs
+}
+
+// splitDeps parses a depends_on attribute value: trimmed, comma-separated.
+// Empty parts are dropped. Mirrors dag.parseDeps so both layers agree.
+func splitDeps(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // lookPathFunc is the function used to check tool availability. It can be
@@ -679,5 +704,64 @@ func v14RunbookWritableByOthers(ast *rbast.RunbookAST) []ValidationError {
 			"⚠ %s is writable by other users. An attacker could modify it. Run: chmod 644 %s",
 			name, name,
 		),
+	}}
+}
+
+// maxParallelUpperBound is the ceiling enforced on max_parallel. Above
+// this the scheduler would spawn an unreasonable number of goroutines
+// and file descriptors (each step opens two pipes). Teams that need
+// more should split the workload into multiple runbooks.
+const maxParallelUpperBound = 256
+
+// v22MaxParallel enforces sensible bounds on the frontmatter max_parallel
+// field. Negative values are a configuration error. Values above
+// maxParallelUpperBound are almost certainly a typo.
+func v22MaxParallel(ast *rbast.RunbookAST) []ValidationError {
+	n := ast.Metadata.MaxParallel
+	if n < 0 {
+		return []ValidationError{{
+			Severity: Error,
+			Message:  fmt.Sprintf("frontmatter max_parallel must be >= 0, got %d", n),
+		}}
+	}
+	if n > maxParallelUpperBound {
+		return []ValidationError{{
+			Severity: Error,
+			Message:  fmt.Sprintf("frontmatter max_parallel=%d exceeds upper bound of %d", n, maxParallelUpperBound),
+		}}
+	}
+	return nil
+}
+
+// v21DependsOnCycles detects cycles in the depends_on graph. The existing
+// v9 rule handles dangling references; this one builds the DAG and
+// reports a cycle path so the user can see the full loop.
+//
+// Self-dependencies (step A depends on itself) are also caught here.
+func v21DependsOnCycles(ast *rbast.RunbookAST) []ValidationError {
+	_, err := dag.Build(ast.Steps)
+	if err == nil {
+		return nil
+	}
+	var cycleErr *dag.CycleError
+	if !errors.As(err, &cycleErr) {
+		// Build only returns CycleError today (dangling deps are silently
+		// dropped to support env-filter semantics). Ignore anything else.
+		return nil
+	}
+
+	// Line number: point to the first step in the cycle.
+	line := 0
+	first := cycleErr.Cycle[0]
+	for _, s := range ast.Steps {
+		if s.Name == first {
+			line = s.Line
+			break
+		}
+	}
+	return []ValidationError{{
+		Severity: Error,
+		Message:  "depends_on " + cycleErr.Error(),
+		Line:     line,
 	}}
 }
