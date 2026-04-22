@@ -574,6 +574,111 @@ func TestV9_DependsOnRefs(t *testing.T) {
 	}
 }
 
+// --- V21: depends_on cycle detection ---
+
+func TestV21_DependsOnCycles(t *testing.T) {
+	tests := []struct {
+		name     string
+		ast      *rbast.RunbookAST
+		wantErr  bool
+		msgParts []string // substrings the error must contain
+	}{
+		{
+			name: "no cycle",
+			ast: &rbast.RunbookAST{
+				Steps: []rbast.StepNode{
+					{Name: "a", Line: 10},
+					{Name: "b", DependsOn: "a", Line: 20},
+					{Name: "c", DependsOn: "b", Line: 30},
+				},
+			},
+		},
+		{
+			name: "direct self-cycle",
+			ast: &rbast.RunbookAST{
+				Steps: []rbast.StepNode{{Name: "loop", DependsOn: "loop", Line: 7}},
+			},
+			wantErr:  true,
+			msgParts: []string{"cycle", "loop"},
+		},
+		{
+			name: "three-step cycle",
+			ast: &rbast.RunbookAST{
+				Steps: []rbast.StepNode{
+					{Name: "a", DependsOn: "c", Line: 10},
+					{Name: "b", DependsOn: "a", Line: 20},
+					{Name: "c", DependsOn: "b", Line: 30},
+				},
+			},
+			wantErr:  true,
+			msgParts: []string{"cycle", "a", "b", "c"},
+		},
+		{
+			name: "multi-parent comma-separated, no cycle",
+			ast: &rbast.RunbookAST{
+				Steps: []rbast.StepNode{
+					{Name: "a", Line: 10},
+					{Name: "b", Line: 20},
+					{Name: "c", DependsOn: "a,b", Line: 30},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := v21DependsOnCycles(tt.ast)
+			got := errorsWithSeverity(errs, Error)
+			if tt.wantErr {
+				if len(got) == 0 {
+					t.Fatal("expected cycle error, got none")
+				}
+				for _, part := range tt.msgParts {
+					if !containsMessage(got, part) {
+						t.Errorf("error message should contain %q, got %v", part, got)
+					}
+				}
+			} else if len(got) > 0 {
+				t.Errorf("expected no errors, got %v", got)
+			}
+		})
+	}
+}
+
+// --- V22: max_parallel bounds ---
+
+func TestV22_MaxParallel(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+		substr  string
+	}{
+		{name: "zero ok", value: 0},
+		{name: "one ok", value: 1},
+		{name: "small positive ok", value: 8},
+		{name: "at upper bound", value: maxParallelUpperBound},
+		{name: "negative rejected", value: -1, wantErr: true, substr: ">= 0"},
+		{name: "way over upper bound rejected", value: 10000, wantErr: true, substr: "exceeds upper bound"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ast := &rbast.RunbookAST{Metadata: rbast.Metadata{MaxParallel: tt.value}}
+			errs := v22MaxParallel(ast)
+			got := errorsWithSeverity(errs, Error)
+			if tt.wantErr {
+				if len(got) == 0 {
+					t.Fatal("expected error, got none")
+				}
+				if !containsMessage(got, tt.substr) {
+					t.Errorf("error should contain %q, got %v", tt.substr, got)
+				}
+			} else if len(got) > 0 {
+				t.Errorf("expected no error, got %v", got)
+			}
+		})
+	}
+}
+
 // --- V10: Required tools ---
 
 func TestV10_RequiredTools(t *testing.T) {

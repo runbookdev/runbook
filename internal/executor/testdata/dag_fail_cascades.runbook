@@ -1,0 +1,31 @@
+---
+name: DAG Failure Cascades
+version: 1.0.0
+max_parallel: 2
+---
+
+# DAG Failure Cascades
+
+When a branch fails, its dependents are skipped while independent
+branches complete. A rollback runs for the already-completed step that
+registered one.
+
+```step name="root"
+echo "root ok"
+```
+
+```step name="branch-good" depends_on="root" rollback="undo-good"
+echo "branch-good ok"
+```
+
+```step name="branch-bad" depends_on="root"
+echo "branch-bad failing"; exit 1
+```
+
+```step name="after-bad" depends_on="branch-bad"
+echo "should never run"
+```
+
+```rollback name="undo-good"
+echo "undoing good"
+```

@@ -25,10 +25,12 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/runbookdev/runbook/internal/ast"
 	"github.com/runbookdev/runbook/internal/audit"
+	"github.com/runbookdev/runbook/internal/dag"
 	"github.com/runbookdev/runbook/internal/parser"
 	"github.com/runbookdev/runbook/internal/resolver"
 	"github.com/runbookdev/runbook/internal/validator"
@@ -117,6 +119,45 @@ const (
 	ConfirmAbort
 )
 
+// stepOutcome categorises confirm-gate flow-control outcomes so the DAG
+// coordinator can act without duplicating the sequential logic.
+type stepOutcome int
+
+const (
+	outcomeProceed    stepOutcome = iota // no special handling — run the step
+	outcomeSkipByUser                    // confirm → skip (treat as success for scheduling)
+	outcomeAbort                         // confirm → abort
+	outcomeDenied                        // confirm → no (triggers rollback)
+)
+
+// stepCompletion is the message DAG workers send back to the coordinator.
+// Either `result` is set (command ran) or `action` is non-zero (confirm
+// gate produced a flow-control outcome and no command ran).
+type stepCompletion struct {
+	node   *dag.Node
+	step   ast.StepNode
+	result *StepResult
+	err    error
+	action stepOutcome
+}
+
+// syncWriter serializes writes to an underlying writer. Used in DAG mode
+// to protect shared stdout/stderr against concurrent writes from parallel
+// step workers (bytes.Buffer in tests and the Go stdio files on POSIX
+// both lack their own concurrency guarantees).
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func newSyncWriter(w io.Writer) *syncWriter { return &syncWriter{w: w} }
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 // RunResult holds the final outcome of a runbook execution.
 type RunResult struct {
 	Status         RunStatus
@@ -158,6 +199,13 @@ type RunOptions struct {
 	// AuditLogger is an optional audit logger. When non-nil every execution
 	// is recorded. The caller is responsible for opening and closing it.
 	AuditLogger *audit.Logger
+	// MaxParallel caps the number of steps the DAG scheduler runs
+	// concurrently. Zero or one preserves the legacy sequential
+	// document-order execution. Values >1 activate the DAG scheduler,
+	// running independent branches of the dependency graph in parallel.
+	// The frontmatter `max_parallel` field takes precedence when both are
+	// set and the frontmatter value is >0.
+	MaxParallel int
 }
 
 // runContext holds the shared state for an in-progress execution,
@@ -177,6 +225,19 @@ type runContext struct {
 	logDebug         func(format string, args ...any)
 	stderr           io.Writer
 	promptInput      io.Reader
+
+	// promptMu serializes confirm prompts and rollback-plan prompts so
+	// that parallel workers never interleave their interactive I/O.
+	// It also protects promptScanner, which is created once and shared
+	// across every interactive read.
+	promptMu sync.Mutex
+	// promptScanner wraps promptInput once, so successive prompts see
+	// piped multi-line input correctly (a fresh bufio.Scanner per prompt
+	// would lose lines already buffered by the previous one).
+	promptScanner *bufio.Scanner
+	// resultMu guards StepResults appends and the RollbackReport assignment
+	// during parallel execution.
+	resultMu sync.Mutex
 }
 
 // Run orchestrates the full runbook lifecycle:
@@ -250,7 +311,11 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 
 	// --- DRY RUN ---
 	if opts.DryRun {
-		printDryRun(stderr, tree, opts.Env)
+		maxPar := opts.MaxParallel
+		if tree.Metadata.MaxParallel > 0 {
+			maxPar = tree.Metadata.MaxParallel
+		}
+		printDryRun(stderr, tree, opts.Env, maxPar)
 		result.Status = RunSuccess
 		result.Phase = PhaseComplete
 		result.Duration = time.Since(start)
@@ -365,6 +430,7 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 		result: result, sigCh: sigCh, logStepAudit: logStepAudit,
 		logRollbackAudit: logRollbackAudit,
 		logDebug:         logDebug, stderr: stderr, promptInput: promptInput,
+		promptScanner: bufio.NewScanner(promptInput),
 	}
 
 	// --- CHECKING ---
@@ -373,7 +439,7 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 	}
 
 	// --- RUNNING ---
-	if r := rc.executeSteps(); r != nil {
+	if r := rc.dispatchSteps(); r != nil {
 		return r
 	}
 
@@ -416,10 +482,35 @@ func (rc *runContext) executeChecks() *RunResult {
 	return nil
 }
 
-// executeSteps runs all step blocks sequentially with rollback tracking.
-// Returns non-nil to short-circuit the caller.
-func (rc *runContext) executeSteps() *RunResult {
+// dispatchSteps routes to either the sequential or DAG-parallel executor
+// based on the effective max-parallel setting.
+//
+// The frontmatter `max_parallel` field takes precedence when >0; otherwise
+// the CLI option applies. Values <=1 keep the legacy sequential path,
+// preserving document-order execution for runbooks that do not opt into
+// parallelism. Values >1 activate the DAG scheduler.
+func (rc *runContext) dispatchSteps() *RunResult {
 	rc.result.Phase = PhaseRunning
+	maxPar := rc.effectiveMaxParallel()
+	if maxPar <= 1 {
+		return rc.executeStepsSequential()
+	}
+	return rc.executeStepsDAG(maxPar)
+}
+
+// effectiveMaxParallel returns the concurrency cap: frontmatter wins over
+// the CLI/options value when positive, so runbook authors can mandate
+// parallelism their document was written for.
+func (rc *runContext) effectiveMaxParallel() int {
+	if rc.tree.Metadata.MaxParallel > 0 {
+		return rc.tree.Metadata.MaxParallel
+	}
+	return rc.opts.MaxParallel
+}
+
+// executeStepsSequential runs steps one at a time in document order.
+// This is the legacy path and preserves exact prior behavior.
+func (rc *runContext) executeStepsSequential() *RunResult {
 	fmt.Fprintf(rc.stderr, "[runbook] running %d steps\n", len(rc.tree.Steps))
 
 	for i, step := range rc.tree.Steps {
@@ -436,60 +527,312 @@ func (rc *runContext) executeSteps() *RunResult {
 			return r
 		}
 
-		stepTimeout := parseDuration(step.Timeout)
-		stepGrace := parseDuration(step.KillGrace) // 0 → executor uses defaultGracePeriod
-
 		fmt.Fprintf(rc.stderr, "[runbook] step [%d/%d] %q\n", i+1, len(rc.tree.Steps), step.Name)
-		rc.logDebug("step command: %s", indentCommand(step.Command))
-		if stepTimeout > 0 {
-			rc.logDebug("step timeout: %s", stepTimeout)
-		}
-
-		stepStart := time.Now()
-		sr, err := rc.exec.Run(rc.ctx, step.Name, step.Command, stepTimeout, stepGrace)
+		sr, err := rc.runStep(rc.ctx, step)
 		if err != nil {
 			return fail(rc.result, RunInternalError,
 				fmt.Sprintf("%s:%d: step %q: %v", rc.opts.FilePath, step.Line, step.Name, err), rc.start)
 		}
-		rc.result.StepResults = append(rc.result.StepResults, *sr)
-		rc.logStepAudit(sr, "step", step.Command)
-		rc.logDebug("step %q finished in %s (exit %d)", step.Name, time.Since(stepStart).Round(time.Millisecond), sr.ExitCode)
+		rc.recordStepResult(sr, step)
 
 		if sr.Status == StatusSuccess {
-			if step.Rollback != "" {
-				if rb, ok := rc.rollbackMap[step.Rollback]; ok {
-					rc.rollbackEngine.Push(rb.Name, rb.Command)
-					rc.logDebug("pushed rollback %q onto stack (depth: %d)", rb.Name, rc.rollbackEngine.Len())
-				}
-			}
+			rc.pushRollback(step)
 			continue
 		}
 
-		// Step failed or timed out — show rollback plan (interactive) then execute.
-		fmt.Fprintf(rc.stderr, "[runbook] %s:%d: step %q %s (exit code %d)\n",
-			rc.opts.FilePath, step.Line, step.Name, sr.Status, sr.ExitCode)
-
-		if !rc.opts.NonInteractive && rc.rollbackEngine.Len() > 0 {
-			if !promptRollbackPlan(rc.stderr, rc.promptInput, step.Name, sr.ExitCode,
-				rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets) {
-				// User declined rollback — clear the stack and exit with step failed.
-				rc.rollbackEngine.stack = rc.rollbackEngine.stack[:0]
-				rc.result.Status = RunStepFailed
-				rc.result.Duration = time.Since(rc.start)
-				return rc.result
-			}
-		}
-
-		rc.result.Phase = PhaseRollingBack
-		report := rc.rollbackEngine.Execute(rc.ctx, "step_failure")
-		report.TriggerStep = step.Name
-		rc.result.RollbackReport = report
-		rc.logRollbackAudit(report)
-		rc.result.Status = rollbackRunStatus(report)
-		rc.result.Duration = time.Since(rc.start)
-		return rc.result
+		return rc.handleStepFailure(step, sr)
 	}
 	return nil
+}
+
+// executeStepsDAG runs steps through the Kahn's-algorithm scheduler with
+// up to maxPar workers in flight. Confirm gates are serialized; step
+// failures cancel in-flight siblings and trigger rollback (LIFO by
+// completion order).
+func (rc *runContext) executeStepsDAG(maxPar int) *RunResult {
+	graph, err := dag.Build(rc.tree.Steps)
+	if err != nil {
+		// Cycles are caught earlier by validator rule v21; this is
+		// defense-in-depth for callers that skipped validation (e.g.
+		// programmatic use of executor.Run).
+		return fail(rc.result, RunValidationError,
+			fmt.Sprintf("%s: %v", rc.opts.FilePath, err), rc.start)
+	}
+
+	// Parallel workers share the same stdout/stderr. Wrap them so their
+	// writes are serialized; both the executor's streaming output and
+	// our own status messages go through these wrappers.
+	rc.stderr = newSyncWriter(rc.stderr)
+	rc.exec.Stdout = newSyncWriter(rc.exec.Stdout)
+	rc.exec.Stderr = newSyncWriter(rc.exec.Stderr)
+	rc.rollbackEngine.Output = rc.stderr
+
+	fmt.Fprintf(rc.stderr, "[runbook] running %d steps (DAG, up to %d in parallel)\n",
+		len(rc.tree.Steps), maxPar)
+
+	// Per-step metadata lookup for confirm/rollback handling.
+	stepByName := make(map[string]ast.StepNode, len(rc.tree.Steps))
+	for _, s := range rc.tree.Steps {
+		stepByName[s.Name] = s
+	}
+
+	sched := dag.NewScheduler(graph)
+	stepCtx, cancelSteps := context.WithCancel(rc.ctx)
+	defer cancelSteps()
+
+	done := make(chan stepCompletion, maxPar)
+
+	var (
+		inFlight   int
+		firstFail  *stepCompletion // the step whose failure triggered shutdown
+		aborted    bool            // user requested abort via confirm or signal
+		userDenied bool            // confirm gate answered "no" with rollback decline
+	)
+
+	// drain waits for all in-flight workers to complete after a cancellation.
+	// Workers that raced to success before the cancellation are recorded,
+	// and their rollbacks are pushed so the rollback pass covers them.
+	drain := func() {
+		for inFlight > 0 {
+			c := <-done
+			inFlight--
+			if c.err != nil || c.result == nil {
+				continue
+			}
+			rc.recordStepResult(c.result, c.step)
+			if c.result.Status == StatusSuccess {
+				rc.pushRollback(c.step)
+			}
+		}
+	}
+
+	for sched.HasWork() && firstFail == nil && !aborted && !userDenied {
+		// Handle pending signal before dispatching more work.
+		if action := pollSignal(rc.sigCh); action != nil {
+			cancelSteps()
+			drain()
+			r := handleSignal(rc.ctx, *action, rc.result, rc.rollbackEngine, rc.start)
+			rc.logRollbackAudit(rc.result.RollbackReport)
+			return r
+		}
+
+		// Dispatch as many ready workers as the cap allows.
+		slots := maxPar - inFlight
+		for _, node := range sched.PopReady(slots) {
+			step, ok := stepByName[node.Name]
+			if !ok {
+				// Shouldn't happen — graph was built from rc.tree.Steps.
+				return fail(rc.result, RunInternalError,
+					fmt.Sprintf("step %q missing from lookup table", node.Name), rc.start)
+			}
+			inFlight++
+			go rc.runDAGWorker(stepCtx, node, step, done)
+		}
+
+		if inFlight == 0 {
+			// No ready nodes and none in flight — should be covered by
+			// HasWork() returning false, but guard anyway.
+			break
+		}
+
+		c := <-done
+		inFlight--
+
+		switch c.action {
+		case outcomeSkipByUser:
+			// Treat as success for scheduling purposes: dependents proceed.
+			fmt.Fprintf(rc.stderr, "[runbook] step %q: skipped by user\n", c.step.Name)
+			sched.CompleteSuccess(c.node.Name)
+			continue
+		case outcomeAbort:
+			aborted = true
+			cancelSteps()
+			drain()
+			r := handleSignal(rc.ctx, ActionQuit, rc.result, rc.rollbackEngine, rc.start)
+			rc.logRollbackAudit(rc.result.RollbackReport)
+			return r
+		case outcomeDenied:
+			// User declined confirmation. Cancel remaining, offer rollback.
+			userDenied = true
+			cancelSteps()
+			drain()
+			return rc.declineConfirm(c.step)
+		}
+
+		if c.err != nil {
+			cancelSteps()
+			drain()
+			return fail(rc.result, RunInternalError,
+				fmt.Sprintf("%s:%d: step %q: %v", rc.opts.FilePath, c.step.Line, c.step.Name, c.err), rc.start)
+		}
+
+		rc.recordStepResult(c.result, c.step)
+
+		if c.result.Status == StatusSuccess {
+			rc.pushRollback(c.step)
+			sched.CompleteSuccess(c.node.Name)
+			continue
+		}
+
+		// Step failed or timed out — cancel siblings, drain, rollback.
+		firstFail = &c
+		skipped := sched.Skip(c.node.Name)
+		if len(skipped) > 0 {
+			rc.logDebug("cascading skip to %d dependent step(s): %s",
+				len(skipped), strings.Join(skipped, ", "))
+		}
+		cancelSteps()
+		drain()
+	}
+
+	if firstFail != nil {
+		return rc.handleStepFailure(firstFail.step, firstFail.result)
+	}
+	return nil
+}
+
+// runDAGWorker runs a single step in a goroutine, handling the confirm
+// gate under the shared prompt mutex so parallel workers never interleave
+// their I/O. The result (or flow-control action) is delivered on `done`.
+func (rc *runContext) runDAGWorker(ctx context.Context, node *dag.Node, step ast.StepNode, done chan<- stepCompletion) {
+	action := rc.promptGate(step)
+	switch action {
+	case outcomeSkipByUser, outcomeAbort, outcomeDenied:
+		done <- stepCompletion{node: node, step: step, action: action}
+		return
+	}
+
+	fmt.Fprintf(rc.stderr, "[runbook] step %q (starting)\n", step.Name)
+	sr, err := rc.runStep(ctx, step)
+	done <- stepCompletion{node: node, step: step, result: sr, err: err}
+}
+
+// promptGate is the DAG-path equivalent of handleConfirmGate's
+// confirm-only prompt. It serializes access to the prompt via
+// rc.promptMu so parallel workers never interleave their I/O, and
+// translates the user's response into a stepOutcome. Unlike the
+// sequential handleConfirmGate, this function never runs rollback
+// itself — the coordinator does that after draining in-flight workers.
+func (rc *runContext) promptGate(step ast.StepNode) stepOutcome {
+	if step.Confirm == "" || !confirmMatches(step.Confirm, rc.opts.Env) {
+		return outcomeProceed
+	}
+	if rc.opts.NonInteractive {
+		fmt.Fprintf(rc.stderr, "[runbook] step %q: auto-confirmed (non-interactive)\n", step.Name)
+		return outcomeProceed
+	}
+
+	rc.promptMu.Lock()
+	defer rc.promptMu.Unlock()
+
+	action := promptConfirm(rc.stderr, rc.promptScanner, step.Name, rc.opts.Env, step.Command, rc.tree.ResolvedSecrets)
+	switch action {
+	case ConfirmYes:
+		return outcomeProceed
+	case ConfirmSkip:
+		return outcomeSkipByUser
+	case ConfirmAbort:
+		return outcomeAbort
+	default:
+		return outcomeDenied
+	}
+}
+
+// runStep wraps StepExecutor.Run with logging and timeout parsing. It is
+// safe to call from multiple goroutines.
+func (rc *runContext) runStep(ctx context.Context, step ast.StepNode) (*StepResult, error) {
+	stepTimeout := parseDuration(step.Timeout)
+	stepGrace := parseDuration(step.KillGrace)
+	rc.logDebug("step command: %s", indentCommand(step.Command))
+	if stepTimeout > 0 {
+		rc.logDebug("step timeout: %s", stepTimeout)
+	}
+	stepStart := time.Now()
+	sr, err := rc.exec.Run(ctx, step.Name, step.Command, stepTimeout, stepGrace)
+	if err == nil && sr != nil {
+		rc.logDebug("step %q finished in %s (exit %d)", step.Name, time.Since(stepStart).Round(time.Millisecond), sr.ExitCode)
+	}
+	return sr, err
+}
+
+// recordStepResult appends a completed step result to the run summary and
+// emits its audit entry. Safe for concurrent callers.
+func (rc *runContext) recordStepResult(sr *StepResult, step ast.StepNode) {
+	rc.resultMu.Lock()
+	rc.result.StepResults = append(rc.result.StepResults, *sr)
+	rc.resultMu.Unlock()
+	rc.logStepAudit(sr, "step", step.Command)
+}
+
+// pushRollback adds the step's rollback to the stack when one is declared.
+func (rc *runContext) pushRollback(step ast.StepNode) {
+	if step.Rollback == "" {
+		return
+	}
+	rb, ok := rc.rollbackMap[step.Rollback]
+	if !ok {
+		return
+	}
+	rc.rollbackEngine.Push(rb.Name, rb.Command)
+	rc.logDebug("pushed rollback %q onto stack (depth: %d)", rb.Name, rc.rollbackEngine.Len())
+}
+
+// handleStepFailure runs the shared failure/rollback flow for both
+// execution paths. The failing step's name is recorded as TriggerStep on
+// the rollback report.
+func (rc *runContext) handleStepFailure(step ast.StepNode, sr *StepResult) *RunResult {
+	fmt.Fprintf(rc.stderr, "[runbook] %s:%d: step %q %s (exit code %d)\n",
+		rc.opts.FilePath, step.Line, step.Name, sr.Status, sr.ExitCode)
+
+	if !rc.opts.NonInteractive && rc.rollbackEngine.Len() > 0 {
+		rc.promptMu.Lock()
+		confirmed := promptRollbackPlan(rc.stderr, rc.promptScanner, step.Name, sr.ExitCode,
+			rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets)
+		rc.promptMu.Unlock()
+		if !confirmed {
+			rc.rollbackEngine.clearStack()
+			rc.result.Status = RunStepFailed
+			rc.result.Duration = time.Since(rc.start)
+			return rc.result
+		}
+	}
+
+	rc.result.Phase = PhaseRollingBack
+	report := rc.rollbackEngine.Execute(rc.ctx, "step_failure")
+	report.TriggerStep = step.Name
+	rc.result.RollbackReport = report
+	rc.logRollbackAudit(report)
+	rc.result.Status = rollbackRunStatus(report)
+	rc.result.Duration = time.Since(rc.start)
+	return rc.result
+}
+
+// declineConfirm handles the user-declined-confirmation outcome from the
+// DAG path: offer the rollback plan and exit with RunStepFailed or a
+// rollback status.
+func (rc *runContext) declineConfirm(step ast.StepNode) *RunResult {
+	rc.result.Error = fmt.Sprintf("%s:%d: step %q: user declined confirmation",
+		rc.opts.FilePath, step.Line, step.Name)
+	if rc.rollbackEngine.Len() > 0 {
+		rc.promptMu.Lock()
+		confirmed := promptRollbackPlan(rc.stderr, rc.promptScanner, step.Name, 0,
+			rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets)
+		rc.promptMu.Unlock()
+		if !confirmed {
+			rc.rollbackEngine.clearStack()
+			rc.result.Status = RunStepFailed
+			rc.result.Duration = time.Since(rc.start)
+			return rc.result
+		}
+	}
+	rc.result.Phase = PhaseRollingBack
+	report := rc.rollbackEngine.Execute(rc.ctx, "user_declined")
+	report.TriggerStep = step.Name
+	rc.result.RollbackReport = report
+	rc.logRollbackAudit(report)
+	rc.result.Status = rollbackRunStatus(report)
+	rc.result.Duration = time.Since(rc.start)
+	return rc.result
 }
 
 // skipSentinel is returned by handleConfirmGate to signal a `continue`.
@@ -506,7 +849,7 @@ func (rc *runContext) handleConfirmGate(step ast.StepNode) *RunResult {
 		return nil
 	}
 
-	action := promptConfirm(rc.stderr, rc.promptInput, step.Name, rc.opts.Env, step.Command, rc.tree.ResolvedSecrets)
+	action := promptConfirm(rc.stderr, rc.promptScanner, step.Name, rc.opts.Env, step.Command, rc.tree.ResolvedSecrets)
 	switch action {
 	case ConfirmYes:
 		return nil
@@ -520,7 +863,7 @@ func (rc *runContext) handleConfirmGate(step ast.StepNode) *RunResult {
 	default: // ConfirmNo
 		rc.result.Error = fmt.Sprintf("%s:%d: step %q: user declined confirmation", rc.opts.FilePath, step.Line, step.Name)
 		if rc.rollbackEngine.Len() > 0 {
-			if !promptRollbackPlan(rc.stderr, rc.promptInput, step.Name, 0,
+			if !promptRollbackPlan(rc.stderr, rc.promptScanner, step.Name, 0,
 				rc.rollbackEngine.Plan(), rc.tree.ResolvedSecrets) {
 				rc.rollbackEngine.stack = rc.rollbackEngine.stack[:0]
 				rc.result.Status = RunStepFailed
@@ -644,7 +987,11 @@ func rollbackRunStatus(report *RollbackReport) RunStatus {
 
 // promptRollbackPlan shows the pending rollback commands and asks the user
 // whether to execute them. Returns true if the user confirms, false to skip.
-func promptRollbackPlan(w io.Writer, r io.Reader, failedStep string, exitCode int, plan []RollbackItem, secrets map[string]string) bool {
+//
+// The scanner is shared across all prompts in a run so that piped
+// multi-line input (e.g. "y\ny\n") is consumed line-by-line, not
+// swallowed by the first call's read-ahead buffer.
+func promptRollbackPlan(w io.Writer, sc *bufio.Scanner, failedStep string, exitCode int, plan []RollbackItem, secrets map[string]string) bool {
 	if exitCode != 0 {
 		fmt.Fprintf(w, "\n✗ Step %q failed (exit code %d).\n", failedStep, exitCode)
 	} else {
@@ -657,13 +1004,12 @@ func promptRollbackPlan(w io.Writer, r io.Reader, failedStep string, exitCode in
 	}
 	fmt.Fprintf(w, "\nExecute rollback? [y]es / [n]o (skip rollback and exit)\n")
 
-	scanner := bufio.NewScanner(r)
 	for {
 		fmt.Fprintf(w, "  Confirm [y/n]: ")
-		if !scanner.Scan() {
+		if !sc.Scan() {
 			return true // default yes on EOF / non-interactive pipe
 		}
-		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+		switch strings.ToLower(strings.TrimSpace(sc.Text())) {
 		case "y", "yes":
 			return true
 		case "n", "no":
@@ -675,7 +1021,9 @@ func promptRollbackPlan(w io.Writer, r io.Reader, failedStep string, exitCode in
 // promptConfirm displays a confirmation gate and reads the user's response.
 // Secret values in command are replaced with **** in the display. The user may
 // type [r]eveal to see the full command before deciding.
-func promptConfirm(w io.Writer, r io.Reader, stepName, env, command string, secrets map[string]string) ConfirmAction {
+//
+// The scanner is shared across all prompts in a run (see promptRollbackPlan).
+func promptConfirm(w io.Writer, sc *bufio.Scanner, stepName, env, command string, secrets map[string]string) ConfirmAction {
 	hasSecrets := len(secrets) > 0
 	displayCmd := audit.RedactDisplay(command, secrets)
 
@@ -689,17 +1037,16 @@ func promptConfirm(w io.Writer, r io.Reader, stepName, env, command string, secr
 		fmt.Fprintf(w, "  [r]eveal — show full command\n")
 	}
 
-	scanner := bufio.NewScanner(r)
 	for {
 		if hasSecrets {
 			fmt.Fprintf(w, "  Confirm [y/n/s/a/r]: ")
 		} else {
 			fmt.Fprintf(w, "  Confirm [y/n/s/a]: ")
 		}
-		if !scanner.Scan() {
+		if !sc.Scan() {
 			return ConfirmNo
 		}
-		input := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		input := strings.ToLower(strings.TrimSpace(sc.Text()))
 		if hasSecrets && (input == "r" || input == "reveal") {
 			fmt.Fprintf(w, "  Full command: %s\n", command)
 			continue
@@ -725,13 +1072,18 @@ func parseConfirmAction(s string) ConfirmAction {
 
 // printDryRun displays the execution plan without running any commands.
 // Secret values in resolved commands are replaced with **** for display.
-func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
+// When maxPar > 1 the step section is printed as DAG layers so users can
+// see which groups will run in parallel.
+func printDryRun(w io.Writer, tree *ast.RunbookAST, env string, maxPar int) {
 	fmt.Fprintf(w, "\n[dry-run] Runbook: %s (v%s)\n", tree.Metadata.Name, tree.Metadata.Version)
 	if env != "" {
 		fmt.Fprintf(w, "[dry-run] Environment: %s\n", env)
 	}
 	if tree.Metadata.Timeout != "" {
 		fmt.Fprintf(w, "[dry-run] Global timeout: %s\n", tree.Metadata.Timeout)
+	}
+	if maxPar > 1 {
+		fmt.Fprintf(w, "[dry-run] Max parallel: %d (DAG scheduler)\n", maxPar)
 	}
 
 	if len(tree.Checks) > 0 {
@@ -743,27 +1095,10 @@ func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 	}
 
 	if len(tree.Steps) > 0 {
-		fmt.Fprintf(w, "\n[dry-run] Steps (%d):\n", len(tree.Steps))
-		for i, s := range tree.Steps {
-			var extras []string
-			if s.Timeout != "" {
-				extras = append(extras, "timeout="+s.Timeout)
-			}
-			if s.Rollback != "" {
-				extras = append(extras, "rollback="+s.Rollback)
-			}
-			if s.Confirm != "" {
-				extras = append(extras, "confirm="+s.Confirm)
-			}
-			if len(s.Env) > 0 {
-				extras = append(extras, "env=["+strings.Join(s.Env, ", ")+"]")
-			}
-			suffix := ""
-			if len(extras) > 0 {
-				suffix = " (" + strings.Join(extras, ", ") + ")"
-			}
-			fmt.Fprintf(w, "  %d. %s%s\n", i+1, s.Name, suffix)
-			fmt.Fprintf(w, "     %s\n", indentCommand(audit.RedactDisplay(s.Command, tree.ResolvedSecrets)))
+		if maxPar > 1 {
+			printDryRunDAG(w, tree, maxPar)
+		} else {
+			printDryRunSequential(w, tree)
 		}
 	}
 
@@ -775,6 +1110,74 @@ func printDryRun(w io.Writer, tree *ast.RunbookAST, env string) {
 	}
 
 	fmt.Fprintf(w, "\n[dry-run] plan complete — no commands were executed\n")
+}
+
+// printDryRunSequential renders steps as a linear list (legacy format).
+func printDryRunSequential(w io.Writer, tree *ast.RunbookAST) {
+	fmt.Fprintf(w, "\n[dry-run] Steps (%d):\n", len(tree.Steps))
+	for i, s := range tree.Steps {
+		printDryRunStep(w, i+1, s, tree.ResolvedSecrets)
+	}
+}
+
+// printDryRunDAG renders steps grouped by topological layer so the user
+// can see which groups will run concurrently. Each layer's steps would
+// run in parallel (up to maxPar workers).
+func printDryRunDAG(w io.Writer, tree *ast.RunbookAST, maxPar int) {
+	graph, err := dag.Build(tree.Steps)
+	if err != nil {
+		// Cycle or similar — fall back to sequential display.
+		fmt.Fprintf(w, "\n[dry-run] Warning: could not build DAG (%v); falling back to linear plan\n", err)
+		printDryRunSequential(w, tree)
+		return
+	}
+	levels := graph.Levels()
+	fmt.Fprintf(w, "\n[dry-run] Steps (%d, across %d DAG layer(s), up to %d parallel):\n",
+		len(tree.Steps), len(levels), maxPar)
+
+	stepByName := make(map[string]ast.StepNode, len(tree.Steps))
+	for _, s := range tree.Steps {
+		stepByName[s.Name] = s
+	}
+
+	counter := 0
+	for lvl, layer := range levels {
+		header := fmt.Sprintf("Layer %d (%d step)", lvl, len(layer))
+		if len(layer) > 1 {
+			header = fmt.Sprintf("Layer %d (%d steps, parallel)", lvl, len(layer))
+		}
+		fmt.Fprintf(w, "\n  %s:\n", header)
+		for _, node := range layer {
+			counter++
+			printDryRunStep(w, counter, stepByName[node.Name], tree.ResolvedSecrets)
+		}
+	}
+}
+
+// printDryRunStep renders one step with its metadata and command body.
+func printDryRunStep(w io.Writer, n int, s ast.StepNode, secrets map[string]string) {
+	var extras []string
+	if s.Timeout != "" {
+		extras = append(extras, "timeout="+s.Timeout)
+	}
+	if s.Rollback != "" {
+		extras = append(extras, "rollback="+s.Rollback)
+	}
+	if s.Confirm != "" {
+		extras = append(extras, "confirm="+s.Confirm)
+	}
+	if s.DependsOn != "" {
+		extras = append(extras, "depends_on="+s.DependsOn)
+	}
+	if len(s.Env) > 0 {
+		extras = append(extras, "env=["+strings.Join(s.Env, ", ")+"]")
+	}
+	suffix := ""
+	if len(extras) > 0 {
+		suffix = " (" + strings.Join(extras, ", ") + ")"
+	}
+	fmt.Fprintf(w, "    %d. %s%s\n", n, s.Name, suffix)
+	fmt.Fprintf(w, "       %s\n", indentCommand(audit.RedactDisplay(s.Command, secrets)))
 }
 
 // newRunID generates a unique run identifier using crypto/rand.

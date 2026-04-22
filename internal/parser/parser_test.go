@@ -592,7 +592,7 @@ func TestParse_BlockCountLimit_AtLimit(t *testing.T) {
 	// Exactly 1000 blocks should succeed (unique names required).
 	var b strings.Builder
 	b.WriteString("---\nname: At Limit\n---\n")
-	for i := 0; i < maxBlocks; i++ {
+	for i := range maxBlocks {
 		b.WriteString("```step name=\"s")
 		b.WriteString(itoa(i))
 		b.WriteString("\"\necho ok\n```\n")

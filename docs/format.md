@@ -30,24 +30,26 @@ requires:
 timeout: 30m                         # optional — global execution timeout
 trigger: on-call                     # optional — informational trigger label
 severity: high                       # optional — informational severity label
+max_parallel: 3                      # optional — concurrent steps for DAG scheduling
 ---
 ```
 
 ### Frontmatter fields
 
-| Field                  | Type              | Required | Description                                             |
-|------------------------|-------------------|----------|---------------------------------------------------------|
-| `name`                 | string            | yes      | Human-readable name shown in output and audit log       |
-| `version`              | string            | no       | Version string displayed in dry-run and audit           |
-| `description`          | string            | no       | Multi-line description of the runbook's purpose         |
-| `owners`               | list of strings   | no       | Owners or team names (informational)                    |
-| `environments`         | list of strings   | no       | If set, restricts execution to named environments       |
-| `requires.tools`       | list of strings   | no       | Tool names checked on `PATH` before execution           |
-| `requires.permissions` | list of strings   | no       | Permission labels (informational)                       |
-| `requires.approvals`   | map of env → list | no       | Required approvals per environment (informational)      |
-| `timeout`              | duration          | no       | Maximum total execution time (e.g. `30m`, `2h`, `300s`) |
-| `trigger`              | string            | no       | Informational trigger label                             |
-| `severity`             | string            | no       | Informational severity label                            |
+| Field                  | Type              | Required | Description                                                                                                  |
+|------------------------|-------------------|----------|--------------------------------------------------------------------------------------------------------------|
+| `name`                 | string            | yes      | Human-readable name shown in output and audit log                                                            |
+| `version`              | string            | no       | Version string displayed in dry-run and audit                                                                |
+| `description`          | string            | no       | Multi-line description of the runbook's purpose                                                              |
+| `owners`               | list of strings   | no       | Owners or team names (informational)                                                                         |
+| `environments`         | list of strings   | no       | If set, restricts execution to named environments                                                            |
+| `requires.tools`       | list of strings   | no       | Tool names checked on `PATH` before execution                                                                |
+| `requires.permissions` | list of strings   | no       | Permission labels (informational)                                                                            |
+| `requires.approvals`   | map of env → list | no       | Required approvals per environment (informational)                                                           |
+| `timeout`              | duration          | no       | Maximum total execution time (e.g. `30m`, `2h`, `300s`)                                                      |
+| `trigger`              | string            | no       | Informational trigger label                                                                                  |
+| `severity`             | string            | no       | Informational severity label                                                                                 |
+| `max_parallel`         | integer           | no       | Cap on concurrent steps in DAG mode; `0`/`1` = sequential. Overrides the CLI `--max-parallel` flag when set. |
 
 ---
 
@@ -81,7 +83,10 @@ echo "Cluster has enough ready nodes"
 
 ### step
 
-A `step` block is an executable unit of work. Steps run in document order unless `depends_on` reorders them.
+A `step` block is an executable unit of work. By default steps run in document order.
+When `max_parallel` (frontmatter) or `--max-parallel` (CLI) is greater than 1, steps run
+through a DAG scheduler: independent steps execute concurrently, and `depends_on` enforces
+ordering between branches. `depends_on` accepts a single step name or a comma-separated list.
 
 ````
 ```step name="<name>" [rollback="<rollback-name>"] [depends_on="<step-name>"]
@@ -94,15 +99,15 @@ A `step` block is an executable unit of work. Steps run in document order unless
 ```
 ````
 
-| Attribute    | Required | Description                                                                             |
-|--------------|----------|-----------------------------------------------------------------------------------------|
-| `name`       | yes      | Unique identifier for this step                                                         |
-| `rollback`   | no       | Name of the rollback block to execute if this step or a later one fails                 |
-| `depends_on` | no       | Name of a preceding step that must succeed before this one runs                         |
-| `timeout`    | no       | Maximum time for this step (e.g. `300s`, `5m`). Sends SIGTERM, waits 10 s, then SIGKILL |
-| `confirm`    | no       | Environment name that triggers an interactive `[y/n/s/a]` prompt                        |
-| `env`        | no       | Environments in which this step runs; silently skipped in all others                    |
-| `kill_grace` | no       | Grace period between SIGTERM and SIGKILL for this step (default: `10s`)                 |
+| Attribute    | Required | Description                                                                               |
+|--------------|----------|-------------------------------------------------------------------------------------------|
+| `name`       | yes      | Unique identifier for this step                                                           |
+| `rollback`   | no       | Name of the rollback block to execute if this step or a later one fails                   |
+| `depends_on` | no       | One or more preceding step names (comma-separated) that must succeed before this one runs |
+| `timeout`    | no       | Maximum time for this step (e.g. `300s`, `5m`). Sends SIGTERM, waits 10 s, then SIGKILL   |
+| `confirm`    | no       | Environment name that triggers an interactive `[y/n/s/a]` prompt                          |
+| `env`        | no       | Environments in which this step runs; silently skipped in all others                      |
+| `kill_grace` | no       | Grace period between SIGTERM and SIGKILL for this step (default: `10s`)                   |
 
 The step body begins after the `---` separator. If there are no attributes, `---` can be omitted.
 

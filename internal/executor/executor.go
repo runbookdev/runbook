@@ -125,6 +125,7 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 		_ = tmpFile.Close()
 		return nil, fmt.Errorf("writing temp script: %w", err)
 	}
+
 	if err := tmpFile.Close(); err != nil {
 		return nil, fmt.Errorf("closing temp script: %w", err)
 	}
@@ -161,6 +162,7 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 	if err != nil {
 		return nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
+
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, fmt.Errorf("creating stderr pipe: %w", err)
@@ -247,6 +249,7 @@ func buildResult(stepName string, waitErr error, stdoutBuf, stderrBuf *limitedBu
 	if stdoutBuf.truncated {
 		result.Stderr += fmt.Sprintf("\n[runbook] WARNING: stdout truncated at %d bytes", maxOutputBytes)
 	}
+
 	if stderrBuf.truncated {
 		result.Stderr += fmt.Sprintf("\n[runbook] WARNING: stderr truncated at %d bytes", maxOutputBytes)
 	}
@@ -279,10 +282,12 @@ func checkOrphans(parentPID int, stepName string, w io.Writer) {
 	if len(orphans) == 0 {
 		return
 	}
+
 	pids := make([]string, len(orphans))
 	for i, p := range orphans {
 		pids[i] = strconv.Itoa(p)
 	}
+
 	fmt.Fprintf(w,
 		"⚠ Warning: step %q was killed but left %d orphaned processes. PIDs: [%s]. Consider adding 'exec' prefix to your commands.\n",
 		stepName, len(orphans), strings.Join(pids, ", "))
@@ -347,11 +352,13 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if b.truncated {
 		return len(p), nil
 	}
+
 	remaining := b.max - b.buf.Len()
 	if remaining <= 0 {
 		b.truncated = true
 		return len(p), nil
 	}
+
 	if len(p) > remaining {
 		b.buf.Write(p[:remaining])
 		b.truncated = true
@@ -369,6 +376,7 @@ func ResolvedDir(filePath string) string {
 	if filePath == "" {
 		return ""
 	}
+
 	abs, err := filepath.Abs(filePath)
 	if err != nil {
 		return filepath.Dir(filePath)

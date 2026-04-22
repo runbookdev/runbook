@@ -40,6 +40,7 @@ func newRunCmd() *cobra.Command {
 		verbose        bool
 		auditDir       string
 		strict         bool
+		maxParallel    int
 	)
 
 	cmd := &cobra.Command{
@@ -108,6 +109,7 @@ local audit log.`,
 				Strict:         strict,
 				Shell:          cfg.Shell,
 				AuditLogger:    al,
+				MaxParallel:    maxParallel,
 			})
 
 			printRunSummary(result, verbose)
@@ -124,6 +126,7 @@ local audit log.`,
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show detailed step output in the summary")
 	cmd.Flags().StringVar(&auditDir, "audit-dir", "", "path to the audit database (default: ~/.runbook/audit/runbook.db)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat shell metacharacter warnings as hard errors (exit code 3)")
+	cmd.Flags().IntVar(&maxParallel, "max-parallel", 0, "max steps the DAG scheduler runs in parallel (0/1 = sequential; frontmatter max_parallel overrides when set)")
 
 	cmd.ValidArgsFunction = completeRunbookFiles
 	_ = cmd.RegisterFlagCompletionFunc("env", completeEnvNames)
@@ -168,7 +171,7 @@ func printRunSummary(r *executor.RunResult, verbose bool) {
 			fmt.Fprintf(os.Stderr, "  %s [%d/%d] %s %s\n", status, i+1, len(r.StepResults), sr.StepName, dur)
 			if verbose && sr.Status != executor.StatusSuccess {
 				if sr.Stderr != "" {
-					for _, line := range strings.Split(strings.TrimSpace(sr.Stderr), "\n") {
+					for line := range strings.SplitSeq(strings.TrimSpace(sr.Stderr), "\n") {
 						dim.Fprintf(os.Stderr, "         %s\n", line)
 					}
 				}

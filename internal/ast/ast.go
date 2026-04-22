@@ -42,6 +42,11 @@ type Metadata struct {
 	Timeout      string       `yaml:"timeout"`
 	Trigger      string       `yaml:"trigger"`
 	Severity     string       `yaml:"severity"`
+	// MaxParallel caps the number of steps the DAG scheduler will run
+	// concurrently. Zero means "use the caller's default" (sequential
+	// unless the CLI flag overrides). Values >1 enable parallel execution
+	// of independent branches in the dependency graph.
+	MaxParallel int `yaml:"max_parallel"`
 }
 
 // Requirements describes tools, permissions, and approvals needed to run.

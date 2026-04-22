@@ -661,7 +661,7 @@ func TestT23_RunIDsUseCryptoRand(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]bool, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := newRunID()
 
 		// Format: "run_" + 8 lowercase hex characters.
