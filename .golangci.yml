@@ -52,6 +52,7 @@ linters:
         - behaviour
         - initialised
         - materialise
+        - categorises 
     revive:
       enable-all-rules: false
       enable-default-rules: true
