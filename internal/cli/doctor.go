@@ -56,7 +56,9 @@ To update runbook manually:
   brew upgrade runbook`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			// doctor re-runs the config load itself so it can display any
+			// parse / permission warnings as part of its check output.
+			cfg, cfgWarnings, cfgErr := loadConfig()
 
 			// Resolve audit DB path using the same logic as history/run.
 			dbPath := auditDir
@@ -76,7 +78,7 @@ To update runbook manually:
 				runbookFile = args[0]
 			}
 
-			ok := runDoctor(cmd, cfg, dbPath, runbookFile)
+			ok := runDoctor(cmd, cfg, dbPath, runbookFile, cfgWarnings, cfgErr)
 			if !ok {
 				return fmt.Errorf("one or more checks failed")
 			}
@@ -90,7 +92,7 @@ To update runbook manually:
 
 // runDoctor executes all health checks and returns true only if every check
 // passed (warnings do not cause a false return).
-func runDoctor(cmd *cobra.Command, cfg Config, dbPath, runbookFile string) bool {
+func runDoctor(cmd *cobra.Command, cfg Config, dbPath, runbookFile string, cfgWarnings []string, cfgErr error) bool {
 	out := cmd.OutOrStdout()
 	allOK := true
 
@@ -114,11 +116,17 @@ func runDoctor(cmd *cobra.Command, cfg Config, dbPath, runbookFile string) bool 
 	}
 
 	// ── Config file ────────────────────────────────────────────────────────
-	checkConfigFile(out, cfg)
+	checkConfigFile(out, cfg, cfgWarnings, cfgErr)
+
+	// ── env_file path (if configured) ──────────────────────────────────────
+	checkConfigEnvFilePath(out, cfg, runbookFile)
 
 	// ── Runbook-specific checks ────────────────────────────────────────────
 	if runbookFile != "" {
 		if ok := checkRunbookFile(out, runbookFile); !ok {
+			allOK = false
+		}
+		if ok := checkRunbookDirModes(out, runbookFile); !ok {
 			allOK = false
 		}
 	}
@@ -196,27 +204,121 @@ func checkAuditDB(out io.Writer, dbPath string) bool {
 	return ok
 }
 
-// checkConfigFile validates the config file if it exists.
-func checkConfigFile(out io.Writer, cfg Config) {
+// checkConfigFile reports on the config file state. It surfaces any
+// advisories loadConfig produced (bad YAML, unknown keys, loose permissions)
+// plus a strict re-parse to catch anything the primary decoder accepted.
+func checkConfigFile(out io.Writer, cfg Config, cfgWarnings []string, cfgErr error) {
 	path := configPath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
+
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
 			fmt.Fprintf(out, "%s  Config file:     not found at %s (using defaults)\n", checkWarn, path)
 		} else {
-			fmt.Fprintf(out, "%s  Config file:     cannot read %s: %v\n", checkWarn, path, err)
+			fmt.Fprintf(out, "%s  Config file:     cannot stat %s: %v\n", checkWarn, path, statErr)
 		}
 		return
 	}
 
-	// Re-parse strictly to catch unknown keys or YAML errors.
+	// Permission bits.
+	perm := info.Mode().Perm()
+	if runtime.GOOS != "windows" && perm&configPermMask != 0 {
+		fmt.Fprintf(out, "%s  Config perms:    %04o — should be %04o (run: chmod %04o %s)\n",
+			checkWarn, perm, configFileMode, configFileMode, path)
+	} else {
+		fmt.Fprintf(out, "%s  Config perms:    %04o\n", checkOK, perm)
+	}
+
+	if cfgErr != nil {
+		fmt.Fprintf(out, "%s  Config file:     %v\n", checkWarn, cfgErr)
+	}
+
+	// Relay any non-permission advisories (unknown keys, YAML decode errors).
+	for _, w := range cfgWarnings {
+		if strings.Contains(w, "permissions") {
+			continue
+		}
+		fmt.Fprintf(out, "%s  %s\n", checkWarn, w)
+	}
+
+	// Re-parse strictly to catch unknown keys or YAML errors even when
+	// loadConfig fell back to defaults.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		fmt.Fprintf(out, "%s  Config file:     invalid YAML at %s: %v\n", checkFail, path, err)
 		return
 	}
+
 	_ = cfg // already loaded by loadConfig; we just validated YAML above.
 	fmt.Fprintf(out, "%s  Config file:     %s\n", checkOK, path)
+}
+
+// checkConfigEnvFilePath validates the env_file setting (from config or from
+// a runbook context) against the safe roots policy.
+func checkConfigEnvFilePath(out io.Writer, cfg Config, runbookFile string) {
+	if cfg.EnvFile == "" {
+		return
+	}
+
+	var runbookDir string
+	if runbookFile != "" {
+		runbookDir = filepath.Dir(runbookFile)
+	}
+
+	if warn := envFilePathWarning(cfg.EnvFile, runbookDir); warn != "" {
+		fmt.Fprintf(out, "%s  %s\n", checkWarn, warn)
+		return
+	}
+	fmt.Fprintf(out, "%s  env_file path:   %s\n", checkOK, cfg.EnvFile)
+}
+
+// checkRunbookDirModes walks the runbook's parent directory (non-recursive)
+// and flags any *.runbook file that is group- or world-writable. Skipped on
+// Windows where Unix permission bits do not apply. Returns false only when
+// the walk itself fails.
+func checkRunbookDirModes(out io.Writer, runbookFile string) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+
+	dir := filepath.Dir(runbookFile)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Fprintf(out, "%s  Runbook dir:     cannot read %s: %v\n", checkWarn, dir, err)
+		return true
+	}
+
+	writable := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".runbook") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.Mode().Perm()&0o022 != 0 {
+			writable = append(writable, entry.Name())
+		}
+	}
+
+	if len(writable) == 0 {
+		fmt.Fprintf(out, "%s  Runbook dir:     %s (all runbook files owner-writable only)\n", checkOK, dir)
+		return true
+	}
+
+	fmt.Fprintf(out, "%s  Runbook dir:     %d .runbook file(s) writable by others in %s:\n",
+		checkWarn, len(writable), dir)
+	for _, name := range writable {
+		fmt.Fprintf(out, "     - %s (run: chmod 644 %s)\n", name, filepath.Join(dir, name))
+	}
+	return true
 }
 
 // checkRunbookFile parses the given .runbook file and runs tool + .env checks.

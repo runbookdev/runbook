@@ -52,7 +52,8 @@ and roll back on failure. Every execution is recorded in the
 local audit log.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			// Warnings were printed by the persistent pre-run hook.
+			cfg, _, _ := loadConfig()
 			filePath := args[0]
 
 			// CLI flags override config.

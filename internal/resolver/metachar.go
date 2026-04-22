@@ -24,8 +24,37 @@ import (
 
 // metaEntry pairs a shell metacharacter sequence with its display label.
 type metaEntry struct {
-	seq     string // literal bytes to search for
-	display string // human-readable label shown in warnings
+	// seq is the literal bytes to search for in resolved values.
+	seq string
+	// display is the human-readable label shown in warnings.
+	display string
+}
+
+// MetacharWarning describes a dangerous metacharacter found in a resolved
+// variable value.
+type MetacharWarning struct {
+	// VarName is the template variable name, e.g. "version".
+	VarName string
+	// Value is the resolved value, e.g. "1.0.0; rm -rf /".
+	Value string
+	// Metachar is the detected metacharacter display label, e.g. ";".
+	Metachar string
+	// BlockType is one of the ast.BlockType* constants.
+	BlockType string
+	// BlockName is the block's name attribute, e.g. "deploy".
+	BlockName string
+	// FilePath is the source .runbook file path.
+	FilePath string
+	// Line is the 1-based source line of the block opening fence.
+	Line int
+}
+
+// MetacharError is returned by Resolve when --strict mode is enabled and
+// dangerous metacharacters are detected in resolved variable values, or when
+// the user declines to continue in interactive mode.
+type MetacharError struct {
+	// Warnings is the list of detected metacharacter issues.
+	Warnings []MetacharWarning
 }
 
 // dangerousMetachars lists shell sequences that may allow command injection.
@@ -42,25 +71,7 @@ var dangerousMetachars = []metaEntry{
 	{seq: ">>", display: ">>"},
 }
 
-// MetacharWarning describes a dangerous metacharacter found in a resolved
-// variable value.
-type MetacharWarning struct {
-	VarName   string // template variable name, e.g. "version"
-	Value     string // resolved value, e.g. "1.0.0; rm -rf /"
-	Metachar  string // detected metacharacter display label, e.g. ";"
-	BlockType string // "step", "check", "rollback", or "wait"
-	BlockName string // block name attribute, e.g. "deploy"
-	FilePath  string // source .runbook file path
-	Line      int    // source line number
-}
-
-// MetacharError is returned by Resolve when --strict mode is enabled and
-// dangerous metacharacters are detected in resolved variable values, or when
-// the user declines to continue in interactive mode.
-type MetacharError struct {
-	Warnings []MetacharWarning
-}
-
+// Error returns a one-line summary of the detected metacharacter problems.
 func (e *MetacharError) Error() string {
 	n := len(e.Warnings)
 	if n == 1 {

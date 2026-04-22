@@ -29,23 +29,31 @@ import (
 type SignalAction int
 
 const (
+	// ActionRollback stops execution and runs the pushed rollback handlers.
 	ActionRollback SignalAction = iota
+	// ActionContinue resumes execution as if no interrupt occurred.
 	ActionContinue
+	// ActionQuit stops execution immediately without running rollbacks.
 	ActionQuit
 )
 
-func (a SignalAction) String() string {
-	switch a {
-	case ActionRollback:
-		return "rollback"
-	case ActionContinue:
-		return "continue"
-	case ActionQuit:
-		return "quit"
-	default:
-		return "unknown"
-	}
-}
+// Labels returned by SignalAction.String.
+const (
+	signalLabelRollback = "rollback"
+	signalLabelContinue = "continue"
+	signalLabelQuit     = "quit"
+	signalLabelUnknown  = "unknown"
+)
+
+// Interactive prompt tokens parsed from the interrupt-response prompt.
+const (
+	signalInputRollback    = "r"
+	signalInputRollbackAlt = "rollback"
+	signalInputContinue    = "c"
+	signalInputContinueAlt = "continue"
+	signalInputQuit        = "q"
+	signalInputQuitAlt     = "quit"
+)
 
 // signalPromptTimeout is how long to wait for user input before defaulting
 // to rollback.
@@ -65,6 +73,20 @@ type SignalHandler struct {
 	actionCh chan SignalAction
 	// done is closed when Stop is called.
 	done chan struct{}
+}
+
+// String returns the lowercase label of the signal action.
+func (a SignalAction) String() string {
+	switch a {
+	case ActionRollback:
+		return signalLabelRollback
+	case ActionContinue:
+		return signalLabelContinue
+	case ActionQuit:
+		return signalLabelQuit
+	default:
+		return signalLabelUnknown
+	}
 }
 
 // NewSignalHandler creates a SignalHandler with default stdin/stderr.
@@ -172,15 +194,17 @@ func (h *SignalHandler) prompt() SignalAction {
 }
 
 // parseAction converts a user response string to a SignalAction.
+// Empty input and anything unrecognised default to ActionRollback (the safe default).
 func parseAction(s string) SignalAction {
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch s {
-	case "c", "continue":
+	case signalInputContinue, signalInputContinueAlt:
 		return ActionContinue
-	case "q", "quit":
+	case signalInputQuit, signalInputQuitAlt:
 		return ActionQuit
+	case signalInputRollback, signalInputRollbackAlt:
+		return ActionRollback
 	default:
-		// Empty string, "r", "rollback", or anything else defaults to rollback.
 		return ActionRollback
 	}
 }

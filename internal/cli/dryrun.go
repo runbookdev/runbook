@@ -38,7 +38,7 @@ func newDryRunCmd() *cobra.Command {
 		Long:  `Alias for "runbook run --dry-run". Parses, validates, and resolves variables, then prints the plan.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			cfg, _, _ := loadConfig()
 			if env == "" {
 				env = cfg.Env
 			}

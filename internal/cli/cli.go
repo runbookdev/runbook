@@ -16,6 +16,9 @@
 package cli
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -42,7 +45,11 @@ checks, sequential steps, automatic rollback, and full audit logging.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			cfg := loadConfig()
+			cfg, warnings, err := loadConfig()
+			printConfigWarnings(warnings)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[runbook] %v\n", err)
+			}
 			if noColor || cfg.NoColor {
 				color.NoColor = true
 			}

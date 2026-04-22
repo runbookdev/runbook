@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -31,6 +32,38 @@ import (
 
 	rbast "github.com/runbookdev/runbook/internal/ast"
 	"github.com/runbookdev/runbook/internal/audit"
+)
+
+// EnvVarPrefix is the prefix used to scope runbook-specific environment
+// variables, both when the resolver reads them and when the executor injects
+// RUNBOOK_* variables into subprocess environments.
+const EnvVarPrefix = "RUNBOOK_"
+
+// Built-in variable names automatically populated on every run and available
+// as {{name}} substitutions in block bodies.
+const (
+	// builtinVarEnv is the target environment passed on the CLI.
+	builtinVarEnv = "env"
+	// builtinVarRunbookName mirrors metadata.name.
+	builtinVarRunbookName = "runbook_name"
+	// builtinVarRunbookVersion mirrors metadata.version.
+	builtinVarRunbookVersion = "runbook_version"
+	// builtinVarRunID is a per-execution UUID.
+	builtinVarRunID = "run_id"
+	// builtinVarTimestamp is the RFC-3339 UTC time of resolution.
+	builtinVarTimestamp = "timestamp"
+	// builtinVarUser is the OS user running the runbook.
+	builtinVarUser = "user"
+	// builtinVarHostname is the host the runbook runs on.
+	builtinVarHostname = "hostname"
+	// builtinVarCWD is the current working directory at run start.
+	builtinVarCWD = "cwd"
+)
+
+// Secret provider names returned from SecretProvider.Name.
+const (
+	providerNameEnv    = "env"
+	providerNameDotEnv = "dotenv"
 )
 
 // varPattern matches {{variable}} references in command bodies.
@@ -60,25 +93,61 @@ type SecretProvider interface {
 	Name() string
 }
 
-// EnvProvider resolves secrets from environment variables with a RUNBOOK_ prefix.
+// EnvProvider resolves secrets from environment variables with the EnvVarPrefix.
 type EnvProvider struct{}
 
-// Resolve returns the value of the RUNBOOK_<key> environment variable.
+// DotEnvProvider resolves secrets from a .env file.
+type DotEnvProvider struct {
+	// vars holds the parsed key/value pairs loaded from the .env file.
+	vars map[string]string
+}
+
+// varRef tracks where a variable is referenced.
+type varRef struct {
+	// name is the variable identifier (without the {{ }} delimiters).
+	name string
+	// blockType is the kind of block the reference appeared in.
+	blockType string
+	// blockName is the referencing block's name attribute.
+	blockName string
+	// line is the 1-based source line of the block opening fence.
+	line int
+}
+
+// varPair holds a single resolved variable substitution.
+type varPair struct {
+	// name is the variable identifier.
+	name string
+	// value is the substituted value.
+	value string
+}
+
+// resolvedUsage records one variable substitution with its location context.
+type resolvedUsage struct {
+	// varName is the variable identifier that was substituted.
+	varName string
+	// value is the value that replaced the reference.
+	value string
+	// blockType is the kind of block the substitution occurred in.
+	blockType string
+	// blockName is the block's name attribute.
+	blockName string
+	// line is the 1-based source line of the block opening fence.
+	line int
+}
+
+// Resolve returns the value of the EnvVarPrefix+<key> environment variable.
 func (p *EnvProvider) Resolve(key string) (string, error) {
-	val, ok := os.LookupEnv("RUNBOOK_" + strings.ToUpper(key))
+	full := EnvVarPrefix + strings.ToUpper(key)
+	val, ok := os.LookupEnv(full)
 	if !ok {
-		return "", fmt.Errorf("environment variable RUNBOOK_%s not set", strings.ToUpper(key))
+		return "", fmt.Errorf("environment variable %s not set", full)
 	}
 	return val, nil
 }
 
 // Name returns the provider name.
-func (p *EnvProvider) Name() string { return "env" }
-
-// DotEnvProvider resolves secrets from a .env file.
-type DotEnvProvider struct {
-	vars map[string]string
-}
+func (p *EnvProvider) Name() string { return providerNameEnv }
 
 // NewDotEnvProvider creates a DotEnvProvider by reading the given .env file.
 func NewDotEnvProvider(path string) (*DotEnvProvider, error) {
@@ -99,30 +168,7 @@ func (p *DotEnvProvider) Resolve(key string) (string, error) {
 }
 
 // Name returns the provider name.
-func (p *DotEnvProvider) Name() string { return "dotenv" }
-
-// varRef tracks where a variable is referenced.
-type varRef struct {
-	name      string
-	blockType string
-	blockName string
-	line      int
-}
-
-// varPair holds a single resolved variable substitution.
-type varPair struct {
-	name  string
-	value string
-}
-
-// resolvedUsage records one variable substitution with its location context.
-type resolvedUsage struct {
-	varName   string
-	value     string
-	blockType string
-	blockName string
-	line      int
-}
+func (p *DotEnvProvider) Name() string { return providerNameDotEnv }
 
 // Resolve resolves all template variables in the AST, filters blocks by target
 // environment, stores both original and resolved commands on each node, and
@@ -141,16 +187,17 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 		if err != nil {
 			return fmt.Errorf("reading env file %s: %w", envFilePath, err)
 		}
+
 		maps.Copy(context, dotenvVars)
 		warnDotEnvPermissions(envFilePath, opts.Stderr)
+		warnDotEnvPath(envFilePath, filepath.Dir(ast.FilePath), opts.Stderr)
 	}
 
-	// 3. Environment variables with RUNBOOK_ prefix.
-	const runbookPrefix = "RUNBOOK_"
+	// 3. Environment variables with the EnvVarPrefix.
 	for _, kv := range os.Environ() {
 		k, v, ok := strings.Cut(kv, "=")
-		if ok && strings.HasPrefix(k, runbookPrefix) {
-			context[strings.ToLower(strings.TrimPrefix(k, runbookPrefix))] = v
+		if ok && strings.HasPrefix(k, EnvVarPrefix) {
+			context[strings.ToLower(strings.TrimPrefix(k, EnvVarPrefix))] = v
 		}
 	}
 
@@ -184,7 +231,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 		for _, r := range refs {
 			unresolved = append(unresolved, varRef{
 				name:      r,
-				blockType: "check",
+				blockType: rbast.BlockTypeCheck,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -193,7 +240,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 			allResolved = append(allResolved, resolvedUsage{
 				varName:   p.name,
 				value:     p.value,
-				blockType: "check",
+				blockType: rbast.BlockTypeCheck,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -209,7 +256,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 		for _, r := range refs {
 			unresolved = append(unresolved, varRef{
 				name:      r,
-				blockType: "step",
+				blockType: rbast.BlockTypeStep,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -218,7 +265,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 			allResolved = append(allResolved, resolvedUsage{
 				varName:   p.name,
 				value:     p.value,
-				blockType: "step",
+				blockType: rbast.BlockTypeStep,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -234,7 +281,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 		for _, r := range refs {
 			unresolved = append(unresolved, varRef{
 				name:      r,
-				blockType: "rollback",
+				blockType: rbast.BlockTypeRollback,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -243,7 +290,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 			allResolved = append(allResolved, resolvedUsage{
 				varName:   p.name,
 				value:     p.value,
-				blockType: "rollback",
+				blockType: rbast.BlockTypeRollback,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -259,7 +306,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 		for _, r := range refs {
 			unresolved = append(unresolved, varRef{
 				name:      r,
-				blockType: "wait",
+				blockType: rbast.BlockTypeWait,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -268,7 +315,7 @@ func Resolve(ast *rbast.RunbookAST, targetEnv string, cliVars map[string]string,
 			allResolved = append(allResolved, resolvedUsage{
 				varName:   p.name,
 				value:     p.value,
-				blockType: "wait",
+				blockType: rbast.BlockTypeWait,
 				blockName: node.Name,
 				line:      node.Line,
 			})
@@ -393,21 +440,21 @@ func containsEnv(envs []string, target string) bool {
 // buildBuiltins returns the built-in variable map.
 func buildBuiltins(ast *rbast.RunbookAST, targetEnv string) map[string]string {
 	vars := map[string]string{
-		"env":             targetEnv,
-		"runbook_name":    ast.Metadata.Name,
-		"runbook_version": ast.Metadata.Version,
-		"run_id":          uuid.New().String(),
-		"timestamp":       time.Now().UTC().Format(time.RFC3339),
+		builtinVarEnv:            targetEnv,
+		builtinVarRunbookName:    ast.Metadata.Name,
+		builtinVarRunbookVersion: ast.Metadata.Version,
+		builtinVarRunID:          uuid.New().String(),
+		builtinVarTimestamp:      time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if u, err := user.Current(); err == nil {
-		vars["user"] = u.Username
+		vars[builtinVarUser] = u.Username
 	}
 	if h, err := os.Hostname(); err == nil {
-		vars["hostname"] = h
+		vars[builtinVarHostname] = h
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		vars["cwd"] = cwd
+		vars[builtinVarCWD] = cwd
 	}
 
 	return vars
@@ -420,16 +467,87 @@ func warnDotEnvPermissions(path string, w io.Writer) {
 	if runtime.GOOS == "windows" {
 		return
 	}
+
 	if w == nil {
 		w = os.Stderr
 	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		return
 	}
+
 	perm := info.Mode().Perm()
 	if perm&^os.FileMode(0o600) != 0 {
 		fmt.Fprintf(w, "⚠ .env file has permissions %04o (world-readable). Run: chmod 600 %s\n",
 			perm, path)
 	}
+}
+
+// warnDotEnvPath warns when the env file resolves to a location outside the
+// user's home directory and the runbook's parent directory. An env file
+// pointing at (say) /etc is not necessarily malicious but it is out-of-band
+// enough that the operator should confirm the path is trusted.
+//
+// runbookDir may be empty when no runbook is in scope; in that case only the
+// home directory is considered a safe root.
+func warnDotEnvPath(envFile, runbookDir string, w io.Writer) {
+	if envFile == "" {
+		return
+	}
+
+	if w == nil {
+		w = os.Stderr
+	}
+
+	abs, err := filepath.Abs(envFile)
+	if err != nil {
+		return
+	}
+
+	if isUnderSafeRoot(abs, runbookDir) {
+		return
+	}
+
+	fmt.Fprintf(w,
+		"⚠ env_file %s resolves outside the runbook's directory and $HOME; "+
+			"make sure the path is trusted\n",
+		abs)
+}
+
+// isUnderSafeRoot reports whether absPath sits inside either the user's home
+// directory or the given runbook directory (when non-empty).
+func isUnderSafeRoot(absPath, runbookDir string) bool {
+	candidates := make([]string, 0, 2)
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, home)
+	}
+
+	if runbookDir != "" {
+		if rd, err := filepath.Abs(runbookDir); err == nil {
+			candidates = append(candidates, rd)
+		}
+	}
+
+	for _, root := range candidates {
+		if pathHasPrefix(absPath, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathHasPrefix reports whether target sits inside prefix. Both paths are
+// treated as cleaned absolute paths. The check compares complete segments so
+// "/foo/bar" is not considered a child of "/foo/b".
+func pathHasPrefix(target, prefix string) bool {
+	target = filepath.Clean(target)
+	prefix = filepath.Clean(prefix)
+
+	if target == prefix {
+		return true
+	}
+
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(target, prefix+sep)
 }

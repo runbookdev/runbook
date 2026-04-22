@@ -41,7 +41,7 @@ func newHistoryCmd() *cobra.Command {
 Use --run-id to show details for a specific run.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
+			cfg, _, _ := loadConfig()
 			dbPath := auditDir
 			if dbPath == "" {
 				dbPath = cfg.AuditDir

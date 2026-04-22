@@ -34,11 +34,23 @@ import (
 type nodeState int
 
 const (
-	statePending    nodeState = iota // parents still running or not started
-	stateReady                       // all parents completed, awaiting dispatch
-	stateDispatched                  // handed out via PopReady
-	stateCompleted                   // CompleteSuccess called
-	stateSkipped                     // transitively dependent on a failed step
+	// statePending means parents are still running or have not started.
+	statePending nodeState = iota
+	// stateReady means all parents completed and the node awaits dispatch.
+	stateReady
+	// stateDispatched means the node was handed out via PopReady.
+	stateDispatched
+	// stateCompleted means CompleteSuccess has been called.
+	stateCompleted
+	// stateSkipped means the node is transitively dependent on a failed step.
+	stateSkipped
+)
+
+// DFS colour constants used by detectCycle.
+const (
+	colourWhite = 0 // unvisited
+	colourGray  = 1 // on the current DFS path
+	colourBlack = 2 // fully explored
 )
 
 // Node is a schedulable step in the DAG.
@@ -54,19 +66,26 @@ type Node struct {
 
 // Graph is an immutable, validated DAG of step dependencies.
 type Graph struct {
-	nodes    []*Node
-	byName   map[string]*Node
-	children map[string][]*Node // parent name -> nodes that depend on it
+	// nodes lists every step in original document order.
+	nodes []*Node
+	// byName resolves a step name to its node.
+	byName map[string]*Node
+	// children maps a parent name to the nodes that depend on it.
+	children map[string][]*Node
 }
 
 // Scheduler drives a Graph using Kahn's algorithm. It is NOT safe for
 // concurrent use: callers must serialize access (typically from a single
 // coordinator goroutine).
 type Scheduler struct {
-	graph   *Graph
-	state   map[string]nodeState
-	pending map[string]int // remaining unresolved parents per node
-	ready   []*Node        // ready queue, kept sorted by Index
+	// graph is the underlying dependency graph being scheduled.
+	graph *Graph
+	// state tracks each node's lifecycle phase.
+	state map[string]nodeState
+	// pending records the count of unresolved parents per node.
+	pending map[string]int
+	// ready is the queue of dispatchable nodes, kept sorted by Index.
+	ready []*Node
 }
 
 // CycleError is returned by Build when the graph contains a cycle.
@@ -76,6 +95,7 @@ type CycleError struct {
 	Cycle []string
 }
 
+// Error formats the cycle as a human-readable arrow chain.
 func (e *CycleError) Error() string {
 	return fmt.Sprintf("dependency cycle: %s", strings.Join(e.Cycle, " -> "))
 }
@@ -143,21 +163,17 @@ func parseDeps(raw string) []string {
 // detectCycle walks the graph and returns a cycle path if found. The returned
 // slice is closed: cycle[0] == cycle[len-1].
 func detectCycle(g *Graph) []string {
-	const (
-		white = 0 // unvisited
-		gray  = 1 // on the current DFS path
-		black = 2 // fully explored
-	)
 	color := make(map[string]int, len(g.nodes))
 	var stack []string
 
 	var visit func(n *Node) []string
 	visit = func(n *Node) []string {
-		color[n.Name] = gray
+		color[n.Name] = colourGray
 		stack = append(stack, n.Name)
+
 		for _, dep := range n.Parents {
 			switch color[dep] {
-			case gray:
+			case colourGray:
 				// Back-edge — slice the cycle off the stack.
 				for i, name := range stack {
 					if name == dep {
@@ -165,19 +181,20 @@ func detectCycle(g *Graph) []string {
 						return append(out, dep)
 					}
 				}
-			case white:
+			case colourWhite:
 				if cyc := visit(g.byName[dep]); cyc != nil {
 					return cyc
 				}
 			}
 		}
+
 		stack = stack[:len(stack)-1]
-		color[n.Name] = black
+		color[n.Name] = colourBlack
 		return nil
 	}
 
 	for _, n := range g.nodes {
-		if color[n.Name] == white {
+		if color[n.Name] == colourWhite {
 			if cyc := visit(n); cyc != nil {
 				return cyc
 			}
@@ -204,6 +221,8 @@ func NewScheduler(g *Graph) *Scheduler {
 	return s
 }
 
+// sortReady keeps the ready queue in document order (by Node.Index) so that
+// PopReady returns nodes deterministically.
 func (s *Scheduler) sortReady() {
 	sort.SliceStable(s.ready, func(i, j int) bool {
 		return s.ready[i].Index < s.ready[j].Index

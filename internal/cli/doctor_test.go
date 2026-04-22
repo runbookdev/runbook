@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -157,7 +158,7 @@ func TestCheckConfigFile_Missing(t *testing.T) {
 	// Since we can't override HOME easily without an env change, we just verify
 	// that checkConfigFile never panics even when the file is absent.
 	var buf bytes.Buffer
-	checkConfigFile(&buf, Config{})
+	checkConfigFile(&buf, Config{}, nil, nil)
 	// Either "not found" (warn) or "config file: /path" (ok) — both are valid.
 	out := buf.String()
 	if !strings.Contains(out, checkOK) && !strings.Contains(out, checkWarn) {
@@ -226,7 +227,7 @@ func TestRunDoctor_NoRunbookFile(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	ok := runDoctor(cmd, Config{}, "/nonexistent/audit.db", "")
+	ok := runDoctor(cmd, Config{}, "/nonexistent/audit.db", "", nil, nil)
 	// Missing audit DB is a warning, not a failure.
 	_ = ok
 	out := buf.String()
@@ -250,10 +251,85 @@ func TestRunDoctor_WithRunbookFile(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	runDoctor(cmd, Config{}, "/nonexistent/audit.db", rbPath)
+	runDoctor(cmd, Config{}, "/nonexistent/audit.db", rbPath, nil, nil)
 	out := buf.String()
 	if !strings.Contains(out, "Doctor Test") {
 		t.Errorf("expected runbook name in output, got %q", out)
+	}
+}
+
+// ── checkRunbookDirModes ───────────────────────────────────────────────────
+
+func TestCheckRunbookDirModes_WorldWritableFlagged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
+
+	dir := t.TempDir()
+	safe := filepath.Join(dir, "safe.runbook")
+	dangerous := filepath.Join(dir, "dangerous.runbook")
+	if err := os.WriteFile(safe, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dangerous, []byte(""), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod explicitly in case umask stripped bits.
+	if err := os.Chmod(dangerous, 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	checkRunbookDirModes(&buf, safe) // doctor is invoked with one runbook file; the walk covers the dir
+
+	out := buf.String()
+	if !strings.Contains(out, "dangerous.runbook") {
+		t.Errorf("expected dangerous.runbook to be flagged, got %q", out)
+	}
+	if strings.Contains(out, "safe.runbook (run:") {
+		t.Errorf("did not expect safe.runbook to be flagged, got %q", out)
+	}
+}
+
+func TestCheckRunbookDirModes_CleanDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
+
+	dir := t.TempDir()
+	rb := filepath.Join(dir, "ok.runbook")
+	if err := os.WriteFile(rb, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	checkRunbookDirModes(&buf, rb)
+
+	out := buf.String()
+	if !strings.Contains(out, "owner-writable only") {
+		t.Errorf("expected clean-dir summary, got %q", out)
+	}
+}
+
+// ── checkConfigEnvFilePath ─────────────────────────────────────────────────
+
+func TestCheckConfigEnvFilePath_WarnsOutsideSafeRoots(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := Config{EnvFile: "/etc/runbook.env"}
+	checkConfigEnvFilePath(&buf, cfg, "")
+
+	out := buf.String()
+	if !strings.Contains(out, "resolves outside") {
+		t.Errorf("expected path warning, got %q", out)
+	}
+}
+
+func TestCheckConfigEnvFilePath_SilentWhenEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	checkConfigEnvFilePath(&buf, Config{}, "")
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when env_file unset, got %q", buf.String())
 	}
 }
 
@@ -269,7 +345,7 @@ func TestRunDoctor_MissingRequiredTool(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	ok := runDoctor(cmd, Config{}, "/nonexistent/audit.db", rbPath)
+	ok := runDoctor(cmd, Config{}, "/nonexistent/audit.db", rbPath, nil, nil)
 	if ok {
 		t.Error("expected runDoctor to return false when a required tool is missing")
 	}

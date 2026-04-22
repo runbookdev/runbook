@@ -39,49 +39,257 @@ import (
 // RunPhase tracks the lifecycle stage.
 type RunPhase string
 
+// Run lifecycle phases.
 const (
-	PhaseInit        RunPhase = "INIT"
-	PhaseChecking    RunPhase = "CHECKING"
-	PhaseRunning     RunPhase = "RUNNING"
-	PhaseComplete    RunPhase = "COMPLETE"
+	// PhaseInit is the startup phase: parsing, validation, variable resolution.
+	PhaseInit RunPhase = "INIT"
+	// PhaseChecking runs precondition (check) blocks.
+	PhaseChecking RunPhase = "CHECKING"
+	// PhaseRunning executes step blocks.
+	PhaseRunning RunPhase = "RUNNING"
+	// PhaseComplete marks a successful run.
+	PhaseComplete RunPhase = "COMPLETE"
+	// PhaseRollingBack executes rollback handlers.
 	PhaseRollingBack RunPhase = "ROLLING_BACK"
-	PhaseAborted     RunPhase = "ABORTED"
+	// PhaseAborted marks a user-initiated shutdown.
+	PhaseAborted RunPhase = "ABORTED"
 )
 
 // RunStatus is the final outcome of a Run invocation.
 type RunStatus int
 
 const (
-	RunSuccess             RunStatus = iota // exit 0
-	RunStepFailed                           // exit 1
-	RunRolledBack                           // exit 2
-	RunValidationError                      // exit 3
-	RunCheckFailed                          // exit 4
-	RunPartiallyRolledBack RunStatus = 5    // exit 5 — rollback ran but some blocks failed
-	RunAborted             RunStatus = 10   // exit 10
-	RunInternalError       RunStatus = 20   // exit 20
+	// RunSuccess indicates the run completed without errors (exit 0).
+	RunSuccess RunStatus = iota
+	// RunStepFailed indicates a step failed and no rollback ran (exit 1).
+	RunStepFailed
+	// RunRolledBack indicates rollback completed cleanly after a failure (exit 2).
+	RunRolledBack
+	// RunValidationError indicates validation or resolution failed (exit 3).
+	RunValidationError
+	// RunCheckFailed indicates a precondition check failed (exit 4).
+	RunCheckFailed
+	// RunPartiallyRolledBack indicates rollback ran but some blocks failed (exit 5).
+	RunPartiallyRolledBack RunStatus = 5
+	// RunAborted indicates the user requested shutdown (exit 10).
+	RunAborted RunStatus = 10
+	// RunInternalError indicates an unexpected failure (exit 20).
+	RunInternalError RunStatus = 20
 )
 
+// String labels returned by RunStatus.String, also persisted as audit status.
+const (
+	runLabelSuccess             = "success"
+	runLabelStepFailed          = "step_failed"
+	runLabelRolledBack          = "rolled_back"
+	runLabelValidationError     = "validation_error"
+	runLabelCheckFailed         = "check_failed"
+	runLabelPartiallyRolledBack = "partially_rolled_back"
+	runLabelAborted             = "aborted"
+	runLabelInternalError       = "internal_error"
+	runLabelUnknown             = "unknown"
+)
+
+// ConfirmAction represents the user's response to a confirmation gate.
+type ConfirmAction int
+
+const (
+	// ConfirmYes executes the step.
+	ConfirmYes ConfirmAction = iota
+	// ConfirmNo declines the step and triggers rollback.
+	ConfirmNo
+	// ConfirmSkip skips the step and continues with the next.
+	ConfirmSkip
+	// ConfirmAbort aborts the run immediately.
+	ConfirmAbort
+)
+
+// Confirm-prompt input tokens parsed from the operator's response.
+const (
+	confirmInputYes    = "y"
+	confirmInputYesAlt = "yes"
+	confirmInputSkip   = "s"
+	confirmInputSkipAlt = "skip"
+	confirmInputAbort  = "a"
+	confirmInputAbortAlt = "abort"
+	confirmInputReveal = "r"
+	confirmInputRevealAlt = "reveal"
+)
+
+// Special confirm-match keyword that forces the prompt for every environment.
+const confirmMatchAlways = "always"
+
+// Yes/No tokens parsed from rollback-plan prompts (short and long forms).
+const (
+	confirmInputNo    = "n"
+	confirmInputNoAlt = "no"
+)
+
+// stepOutcome categorises confirm-gate flow-control outcomes so the DAG
+// coordinator can act without duplicating the sequential logic.
+type stepOutcome int
+
+const (
+	// outcomeProceed indicates no special handling — run the step.
+	outcomeProceed stepOutcome = iota
+	// outcomeSkipByUser indicates a confirm→skip response (treat as success).
+	outcomeSkipByUser
+	// outcomeAbort indicates a confirm→abort response.
+	outcomeAbort
+	// outcomeDenied indicates a confirm→no response (triggers rollback).
+	outcomeDenied
+)
+
+// stepCompletion is the message DAG workers send back to the coordinator.
+// Either `result` is set (command ran) or `action` is non-zero (confirm
+// gate produced a flow-control outcome and no command ran).
+type stepCompletion struct {
+	// node is the scheduler node the worker ran.
+	node *dag.Node
+	// step is the corresponding AST step.
+	step ast.StepNode
+	// result is the execution result when the command ran.
+	result *StepResult
+	// err is a non-nil infrastructure error that prevented execution.
+	err error
+	// action is the confirm-gate outcome when no command was run.
+	action stepOutcome
+}
+
+// syncWriter serializes writes to an underlying writer. Used in DAG mode
+// to protect shared stdout/stderr against concurrent writes from parallel
+// step workers (bytes.Buffer in tests and the Go stdio files on POSIX
+// both lack their own concurrency guarantees).
+type syncWriter struct {
+	// mu guards writes to w.
+	mu sync.Mutex
+	// w is the underlying writer.
+	w io.Writer
+}
+
+// RunResult holds the final outcome of a runbook execution.
+type RunResult struct {
+	// Status is the final status code.
+	Status RunStatus
+	// Phase is the lifecycle phase at the time the run finished.
+	Phase RunPhase
+	// StepResults lists the outcome of each executed step, in completion order.
+	StepResults []StepResult
+	// RollbackReport is non-nil when a rollback pass was executed.
+	RollbackReport *RollbackReport
+	// Duration is the wall-clock time the run took.
+	Duration time.Duration
+	// Error is a human-readable error message, with secrets redacted.
+	Error string
+}
+
+// RunOptions configures a runbook execution.
+type RunOptions struct {
+	// FilePath is the path to the .runbook file.
+	FilePath string
+	// Env is the target environment (e.g. "staging", "production").
+	Env string
+	// Vars are CLI-provided variables (highest priority).
+	Vars map[string]string
+	// EnvFile is an optional path to a .env file.
+	EnvFile string
+	// DryRun shows the execution plan without running commands.
+	DryRun bool
+	// NonInteractive skips all confirmation prompts (auto-yes).
+	NonInteractive bool
+	// Strict treats shell metacharacter warnings in resolved variable values as
+	// hard errors, causing the run to exit with RunValidationError (exit code 3).
+	// Intended for CI pipelines where any injection risk should fail the build.
+	Strict bool
+	// Verbose enables debug-level output (variable resolution, timing, commands).
+	Verbose bool
+	// Shell overrides the DefaultShell.
+	Shell string
+	// Stdout is the writer for real-time output (default: os.Stdout).
+	Stdout io.Writer
+	// Stderr is the writer for status/error output (default: os.Stderr).
+	Stderr io.Writer
+	// PromptInput is the reader for interactive prompts (default: os.Stdin).
+	PromptInput io.Reader
+	// AuditLogger is an optional audit logger. When non-nil every execution
+	// is recorded. The caller is responsible for opening and closing it.
+	AuditLogger *audit.Logger
+	// MaxParallel caps the number of steps the DAG scheduler runs
+	// concurrently. Zero or one preserves the legacy sequential
+	// document-order execution. Values >1 activate the DAG scheduler,
+	// running independent branches of the dependency graph in parallel.
+	// The frontmatter `max_parallel` field takes precedence when both are
+	// set and the frontmatter value is >0.
+	MaxParallel int
+}
+
+// runContext holds the shared state for an in-progress execution,
+// allowing the check and step loops to be extracted from Run.
+type runContext struct {
+	// ctx is the parent context honoured by all step executions.
+	ctx context.Context
+	// opts is the caller-provided RunOptions.
+	opts RunOptions
+	// start is the wall-clock start time of the run.
+	start time.Time
+	// tree is the parsed runbook AST.
+	tree *ast.RunbookAST
+	// exec executes individual step commands.
+	exec *StepExecutor
+	// rollbackEngine holds the LIFO stack of pushed rollbacks.
+	rollbackEngine *RollbackEngine
+	// rollbackMap indexes rollback nodes by name for O(1) lookup.
+	rollbackMap map[string]ast.RollbackNode
+	// result is the accumulating outcome; a pointer to the value returned to the caller.
+	result *RunResult
+	// sigCh delivers interrupt-action choices from the signal handler.
+	sigCh <-chan SignalAction
+	// logStepAudit persists a step execution to the audit log (no-op when nil).
+	logStepAudit func(sr *StepResult, blockType, command string)
+	// logRollbackAudit persists a rollback report to the audit log.
+	logRollbackAudit func(report *RollbackReport)
+	// logDebug writes verbose diagnostic messages when Verbose is enabled.
+	logDebug func(format string, args ...any)
+	// stderr is the caller's stderr writer (wrapped with a syncWriter in DAG mode).
+	stderr io.Writer
+	// promptInput is the caller's input reader for interactive prompts.
+	promptInput io.Reader
+
+	// promptMu serializes confirm prompts and rollback-plan prompts so
+	// that parallel workers never interleave their interactive I/O.
+	// It also protects promptScanner, which is created once and shared
+	// across every interactive read.
+	promptMu sync.Mutex
+	// promptScanner wraps promptInput once, so successive prompts see
+	// piped multi-line input correctly (a fresh bufio.Scanner per prompt
+	// would lose lines already buffered by the previous one).
+	promptScanner *bufio.Scanner
+	// resultMu guards StepResults appends and the RollbackReport assignment
+	// during parallel execution.
+	resultMu sync.Mutex
+}
+
+// String returns the lowercase label of the run status.
 func (s RunStatus) String() string {
 	switch s {
 	case RunSuccess:
-		return "success"
+		return runLabelSuccess
 	case RunStepFailed:
-		return "step_failed"
+		return runLabelStepFailed
 	case RunRolledBack:
-		return "rolled_back"
+		return runLabelRolledBack
 	case RunValidationError:
-		return "validation_error"
+		return runLabelValidationError
 	case RunCheckFailed:
-		return "check_failed"
+		return runLabelCheckFailed
 	case RunPartiallyRolledBack:
-		return "partially_rolled_back"
+		return runLabelPartiallyRolledBack
 	case RunAborted:
-		return "aborted"
+		return runLabelAborted
 	case RunInternalError:
-		return "internal_error"
+		return runLabelInternalError
 	default:
-		return "unknown"
+		return runLabelUnknown
 	}
 }
 
@@ -109,135 +317,14 @@ func (s RunStatus) ExitCode() int {
 	}
 }
 
-// ConfirmAction represents the user's response to a confirmation gate.
-type ConfirmAction int
-
-const (
-	ConfirmYes ConfirmAction = iota
-	ConfirmNo
-	ConfirmSkip
-	ConfirmAbort
-)
-
-// stepOutcome categorises confirm-gate flow-control outcomes so the DAG
-// coordinator can act without duplicating the sequential logic.
-type stepOutcome int
-
-const (
-	outcomeProceed    stepOutcome = iota // no special handling — run the step
-	outcomeSkipByUser                    // confirm → skip (treat as success for scheduling)
-	outcomeAbort                         // confirm → abort
-	outcomeDenied                        // confirm → no (triggers rollback)
-)
-
-// stepCompletion is the message DAG workers send back to the coordinator.
-// Either `result` is set (command ran) or `action` is non-zero (confirm
-// gate produced a flow-control outcome and no command ran).
-type stepCompletion struct {
-	node   *dag.Node
-	step   ast.StepNode
-	result *StepResult
-	err    error
-	action stepOutcome
-}
-
-// syncWriter serializes writes to an underlying writer. Used in DAG mode
-// to protect shared stdout/stderr against concurrent writes from parallel
-// step workers (bytes.Buffer in tests and the Go stdio files on POSIX
-// both lack their own concurrency guarantees).
-type syncWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
+// newSyncWriter wraps w so concurrent writes are serialized.
 func newSyncWriter(w io.Writer) *syncWriter { return &syncWriter{w: w} }
 
+// Write serializes access to the underlying writer.
 func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
-}
-
-// RunResult holds the final outcome of a runbook execution.
-type RunResult struct {
-	Status         RunStatus
-	Phase          RunPhase
-	StepResults    []StepResult
-	RollbackReport *RollbackReport
-	Duration       time.Duration
-	Error          string
-}
-
-// RunOptions configures a runbook execution.
-type RunOptions struct {
-	// FilePath is the path to the .runbook file.
-	FilePath string
-	// Env is the target environment (e.g. "staging", "production").
-	Env string
-	// Vars are CLI-provided variables (highest priority).
-	Vars map[string]string
-	// EnvFile is an optional path to a .env file.
-	EnvFile string
-	// DryRun shows the execution plan without running commands.
-	DryRun bool
-	// NonInteractive skips all confirmation prompts (auto-yes).
-	NonInteractive bool
-	// Strict treats shell metacharacter warnings in resolved variable values as
-	// hard errors, causing the run to exit with RunValidationError (exit code 3).
-	// Intended for CI pipelines where any injection risk should fail the build.
-	Strict bool
-	// Verbose enables debug-level output (variable resolution, timing, commands).
-	Verbose bool
-	// Shell overrides the default /bin/sh.
-	Shell string
-	// Stdout is the writer for real-time output (default: os.Stdout).
-	Stdout io.Writer
-	// Stderr is the writer for status/error output (default: os.Stderr).
-	Stderr io.Writer
-	// PromptInput is the reader for interactive prompts (default: os.Stdin).
-	PromptInput io.Reader
-	// AuditLogger is an optional audit logger. When non-nil every execution
-	// is recorded. The caller is responsible for opening and closing it.
-	AuditLogger *audit.Logger
-	// MaxParallel caps the number of steps the DAG scheduler runs
-	// concurrently. Zero or one preserves the legacy sequential
-	// document-order execution. Values >1 activate the DAG scheduler,
-	// running independent branches of the dependency graph in parallel.
-	// The frontmatter `max_parallel` field takes precedence when both are
-	// set and the frontmatter value is >0.
-	MaxParallel int
-}
-
-// runContext holds the shared state for an in-progress execution,
-// allowing the check and step loops to be extracted from Run.
-type runContext struct {
-	ctx              context.Context
-	opts             RunOptions
-	start            time.Time
-	tree             *ast.RunbookAST
-	exec             *StepExecutor
-	rollbackEngine   *RollbackEngine
-	rollbackMap      map[string]ast.RollbackNode
-	result           *RunResult
-	sigCh            <-chan SignalAction
-	logStepAudit     func(sr *StepResult, blockType, command string)
-	logRollbackAudit func(report *RollbackReport)
-	logDebug         func(format string, args ...any)
-	stderr           io.Writer
-	promptInput      io.Reader
-
-	// promptMu serializes confirm prompts and rollback-plan prompts so
-	// that parallel workers never interleave their interactive I/O.
-	// It also protects promptScanner, which is created once and shared
-	// across every interactive read.
-	promptMu sync.Mutex
-	// promptScanner wraps promptInput once, so successive prompts see
-	// piped multi-line input correctly (a fresh bufio.Scanner per prompt
-	// would lose lines already buffered by the previous one).
-	promptScanner *bufio.Scanner
-	// resultMu guards StepResults appends and the RollbackReport assignment
-	// during parallel execution.
-	resultMu sync.Mutex
 }
 
 // Run orchestrates the full runbook lifecycle:
@@ -365,7 +452,7 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 			_ = al.LogStep(audit.StepLog{
 				RunID:      runID,
 				StepName:   entry.Name,
-				BlockType:  "rollback",
+				BlockType:  ast.BlockTypeRollback,
 				StartedAt:  entry.StartedAt,
 				FinishedAt: entry.FinishedAt,
 				ExitCode:   entry.ExitCode,
@@ -391,7 +478,7 @@ func Run(ctx context.Context, opts RunOptions) *RunResult {
 	// Build executor.
 	shell := opts.Shell
 	if shell == "" {
-		shell = "/bin/sh"
+		shell = DefaultShell
 	}
 	workDir := ResolvedDir(opts.FilePath)
 	logDebug("shell=%s workdir=%s", shell, workDir)
@@ -467,12 +554,13 @@ func (rc *runContext) executeChecks() *RunResult {
 		fmt.Fprintf(rc.stderr, "[runbook] check [%d/%d] %q\n", i+1, len(rc.tree.Checks), check.Name)
 		rc.logDebug("check command: %s", indentCommand(check.Command))
 		checkStart := time.Now()
-		sr, err := rc.exec.Run(rc.ctx, "check:"+check.Name, check.Command, 0, 0)
+		sr, err := rc.exec.Run(rc.ctx, ast.BlockTypeCheck+":"+check.Name, check.Command, 0, 0)
 		if err != nil {
 			return fail(rc.result, RunInternalError,
 				fmt.Sprintf("%s:%d: check %q: %v", rc.opts.FilePath, check.Line, check.Name, err), rc.start)
 		}
-		rc.logStepAudit(sr, "check", check.Command)
+
+		rc.logStepAudit(sr, ast.BlockTypeCheck, check.Command)
 		rc.logDebug("check %q finished in %s (exit %d)", check.Name, time.Since(checkStart).Round(time.Millisecond), sr.ExitCode)
 		if sr.Status != StatusSuccess {
 			return fail(rc.result, RunCheckFailed,
@@ -761,7 +849,7 @@ func (rc *runContext) recordStepResult(sr *StepResult, step ast.StepNode) {
 	rc.resultMu.Lock()
 	rc.result.StepResults = append(rc.result.StepResults, *sr)
 	rc.resultMu.Unlock()
-	rc.logStepAudit(sr, "step", step.Command)
+	rc.logStepAudit(sr, ast.BlockTypeStep, step.Command)
 }
 
 // pushRollback adds the step's rollback to the stack when one is declared.
@@ -798,7 +886,7 @@ func (rc *runContext) handleStepFailure(step ast.StepNode, sr *StepResult) *RunR
 	}
 
 	rc.result.Phase = PhaseRollingBack
-	report := rc.rollbackEngine.Execute(rc.ctx, "step_failure")
+	report := rc.rollbackEngine.Execute(rc.ctx, TriggerStepFailure)
 	report.TriggerStep = step.Name
 	rc.result.RollbackReport = report
 	rc.logRollbackAudit(report)
@@ -826,7 +914,7 @@ func (rc *runContext) declineConfirm(step ast.StepNode) *RunResult {
 		}
 	}
 	rc.result.Phase = PhaseRollingBack
-	report := rc.rollbackEngine.Execute(rc.ctx, "user_declined")
+	report := rc.rollbackEngine.Execute(rc.ctx, TriggerUserDeclined)
 	report.TriggerStep = step.Name
 	rc.result.RollbackReport = report
 	rc.logRollbackAudit(report)
@@ -872,7 +960,7 @@ func (rc *runContext) handleConfirmGate(step ast.StepNode) *RunResult {
 			}
 		}
 		rc.result.Phase = PhaseRollingBack
-		report := rc.rollbackEngine.Execute(rc.ctx, "user_declined")
+		report := rc.rollbackEngine.Execute(rc.ctx, TriggerUserDeclined)
 		report.TriggerStep = step.Name
 		rc.result.RollbackReport = report
 		rc.logRollbackAudit(report)
@@ -943,7 +1031,7 @@ func handleSignal(ctx context.Context, action SignalAction, result *RunResult, e
 	switch action {
 	case ActionRollback:
 		result.Phase = PhaseRollingBack
-		report := engine.Execute(ctx, "user_abort")
+		report := engine.Execute(ctx, TriggerUserAbort)
 		result.RollbackReport = report
 		if report.Succeeded > 0 || report.Failed > 0 {
 			result.Status = RunRolledBack
@@ -966,7 +1054,8 @@ func confirmMatches(confirm, targetEnv string) bool {
 	if confirm == "" {
 		return false
 	}
-	if strings.EqualFold(confirm, "always") {
+
+	if strings.EqualFold(confirm, confirmMatchAlways) {
 		return true
 	}
 	return strings.EqualFold(confirm, targetEnv)
@@ -1010,9 +1099,9 @@ func promptRollbackPlan(w io.Writer, sc *bufio.Scanner, failedStep string, exitC
 			return true // default yes on EOF / non-interactive pipe
 		}
 		switch strings.ToLower(strings.TrimSpace(sc.Text())) {
-		case "y", "yes":
+		case confirmInputYes, confirmInputYesAlt:
 			return true
-		case "n", "no":
+		case confirmInputNo, confirmInputNoAlt:
 			return false
 		}
 	}
@@ -1047,7 +1136,7 @@ func promptConfirm(w io.Writer, sc *bufio.Scanner, stepName, env, command string
 			return ConfirmNo
 		}
 		input := strings.ToLower(strings.TrimSpace(sc.Text()))
-		if hasSecrets && (input == "r" || input == "reveal") {
+		if hasSecrets && (input == confirmInputReveal || input == confirmInputRevealAlt) {
 			fmt.Fprintf(w, "  Full command: %s\n", command)
 			continue
 		}
@@ -1059,11 +1148,11 @@ func promptConfirm(w io.Writer, sc *bufio.Scanner, stepName, env, command string
 func parseConfirmAction(s string) ConfirmAction {
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch s {
-	case "y", "yes":
+	case confirmInputYes, confirmInputYesAlt:
 		return ConfirmYes
-	case "s", "skip":
+	case confirmInputSkip, confirmInputSkipAlt:
 		return ConfirmSkip
-	case "a", "abort":
+	case confirmInputAbort, confirmInputAbortAlt:
 		return ConfirmAbort
 	default:
 		return ConfirmNo

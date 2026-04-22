@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/runbookdev/runbook/internal/resolver"
 )
 
 // maxOutputBytes is the maximum captured output size per stream (1 MB).
@@ -35,48 +37,59 @@ const maxOutputBytes = 1 << 20
 // defaultGracePeriod is how long to wait after SIGTERM before sending SIGKILL.
 const defaultGracePeriod = 10 * time.Second
 
+// DefaultShell is the shell used to execute step scripts when the caller does
+// not override StepExecutor.Shell.
+const DefaultShell = "/bin/sh"
+
+// tempScriptPattern is the os.CreateTemp name pattern for step script files.
+const tempScriptPattern = "runbook-step-*.sh"
+
 // StepStatus represents the outcome of a step execution.
 type StepStatus int
 
 const (
+	// StatusSuccess indicates the step finished with exit code 0.
 	StatusSuccess StepStatus = iota
+	// StatusFailed indicates the step finished with a non-zero exit code.
 	StatusFailed
+	// StatusTimeout indicates the step was killed after exceeding its deadline.
 	StatusTimeout
 )
 
-func (s StepStatus) String() string {
-	switch s {
-	case StatusSuccess:
-		return "success"
-	case StatusFailed:
-		return "failed"
-	case StatusTimeout:
-		return "timeout"
-	default:
-		return "unknown"
-	}
-}
+// StepStatus string labels, also used as audit status values.
+const (
+	statusLabelSuccess = "success"
+	statusLabelFailed  = "failed"
+	statusLabelTimeout = "timeout"
+	statusLabelUnknown = "unknown"
+)
 
 // StepResult holds the outcome of executing a single step.
 type StepResult struct {
+	// StepName is the name of the block that produced this result.
 	StepName string
-	Status   StepStatus
+	// Status is the final status of the execution.
+	Status StepStatus
+	// ExitCode is the subprocess exit code (-1 on timeout).
 	ExitCode int
-	Stdout   string
-	Stderr   string
+	// Stdout is the captured (possibly truncated) standard output.
+	Stdout string
+	// Stderr is the captured (possibly truncated) standard error.
+	Stderr string
+	// Duration is the wall-clock time spent running the step.
 	Duration time.Duration
 }
 
 // StepExecutor runs individual steps as subprocesses.
 type StepExecutor struct {
-	// Shell is the shell binary to invoke (default: /bin/sh).
+	// Shell is the shell binary to invoke. Defaults to DefaultShell.
 	Shell string
 	// WorkDir is the working directory for command execution.
 	WorkDir string
 	// TempDir is the directory for temporary script files. Empty = OS default.
 	// Set in tests to use a controlled directory for permission/cleanup checks.
 	TempDir string
-	// Env is additional environment variables injected as RUNBOOK_* vars.
+	// Env is additional environment variables injected as EnvVarPrefix-prefixed vars.
 	Env map[string]string
 	// Stdout is the writer for real-time stdout streaming (default: os.Stdout).
 	Stdout io.Writer
@@ -91,22 +104,39 @@ type StepExecutor struct {
 	OrphanCheckDelay time.Duration
 }
 
+// String returns the lowercase label of the status.
+func (s StepStatus) String() string {
+	switch s {
+	case StatusSuccess:
+		return statusLabelSuccess
+	case StatusFailed:
+		return statusLabelFailed
+	case StatusTimeout:
+		return statusLabelTimeout
+	default:
+		return statusLabelUnknown
+	}
+}
+
 // Run executes a single step command with the given timeout and grace period.
 // timeout=0 means no per-step deadline (only the parent context applies).
 // gracePeriod=0 falls back to defaultGracePeriod (10s).
 func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeout, gracePeriod time.Duration) (*StepResult, error) {
 	shell := e.Shell
 	if shell == "" {
-		shell = "/bin/sh"
+		shell = DefaultShell
 	}
+
 	stdout := e.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
+
 	stderr := e.Stderr
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+
 	grace := gracePeriod
 	if grace == 0 {
 		grace = defaultGracePeriod
@@ -114,10 +144,11 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 
 	// Write the command to a temp script file (mode 0600 — os.CreateTemp default).
 	// The defer removes the file on any return path, including panics.
-	tmpFile, err := os.CreateTemp(e.TempDir, "runbook-step-*.sh")
+	tmpFile, err := os.CreateTemp(e.TempDir, tempScriptPattern)
 	if err != nil {
 		return nil, fmt.Errorf("creating temp script: %w", err)
 	}
+
 	tmpPath := tmpFile.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
@@ -142,10 +173,10 @@ func (e *StepExecutor) Run(ctx context.Context, stepName, command string, timeou
 	// Non-nil → forward the provided reader (interactive mode).
 	cmd.Stdin = e.Stdin
 
-	// Build environment: inherit current env + RUNBOOK_* vars.
+	// Build environment: inherit current env + EnvVarPrefix-scoped vars.
 	cmd.Env = os.Environ()
 	for k, v := range e.Env {
-		cmd.Env = append(cmd.Env, "RUNBOOK_"+strings.ToUpper(k)+"="+v)
+		cmd.Env = append(cmd.Env, resolver.EnvVarPrefix+strings.ToUpper(k)+"="+v)
 	}
 
 	// Set up output capture with size limits.
@@ -310,11 +341,25 @@ func streamLines(r io.Reader, prefix io.Writer, buf *limitedBuffer) {
 
 // prefixWriter wraps each Write call with a "[step-name] | " prefix.
 type prefixWriter struct {
-	prefix  []byte
-	w       io.Writer
+	// prefix is the pre-computed "[name] | " byte slice prepended to each write.
+	prefix []byte
+	// w is the underlying writer receiving prefixed output.
+	w io.Writer
+	// scratch is a reusable buffer that avoids allocating on every write.
 	scratch []byte
 }
 
+// limitedBuffer captures output up to a maximum size.
+type limitedBuffer struct {
+	// buf holds the captured bytes up to max.
+	buf bytes.Buffer
+	// max is the capture ceiling in bytes.
+	max int
+	// truncated is true once the buffer has stopped accepting input.
+	truncated bool
+}
+
+// newPrefixWriter returns a prefixWriter that tags each write with the step name.
 func newPrefixWriter(stepName string, w io.Writer) *prefixWriter {
 	return &prefixWriter{
 		prefix: append(append([]byte("["), stepName...), "] | "...),
@@ -322,18 +367,22 @@ func newPrefixWriter(stepName string, w io.Writer) *prefixWriter {
 	}
 }
 
+// Write prefixes data with the step label and appends a trailing newline.
 func (p *prefixWriter) Write(data []byte) (int, error) {
 	needed := len(p.prefix) + len(data) + 1
+
 	buf := p.scratch
 	if cap(buf) < needed {
 		buf = make([]byte, 0, needed)
 	} else {
 		buf = buf[:0]
 	}
+
 	buf = append(buf, p.prefix...)
 	buf = append(buf, data...)
 	buf = append(buf, '\n')
 	p.scratch = buf
+
 	_, err := p.w.Write(buf)
 	if err != nil {
 		return 0, err
@@ -341,13 +390,7 @@ func (p *prefixWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// limitedBuffer captures output up to a maximum size.
-type limitedBuffer struct {
-	buf       bytes.Buffer
-	max       int
-	truncated bool
-}
-
+// Write appends p to the buffer, stopping silently at the max size.
 func (b *limitedBuffer) Write(p []byte) (int, error) {
 	if b.truncated {
 		return len(p), nil
@@ -367,6 +410,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// String returns the captured bytes as a string.
 func (b *limitedBuffer) String() string {
 	return b.buf.String()
 }

@@ -60,32 +60,54 @@ func DefaultDBPath() (string, error) {
 
 // RunRecord represents a single runbook execution.
 type RunRecord struct {
-	ID          string
-	Runbook     string
-	Name        string
-	Version     string
+	// ID is the unique run identifier (e.g. "run_a3f1c2d4").
+	ID string
+	// Runbook is the source file path that was executed.
+	Runbook string
+	// Name mirrors metadata.name at the time of the run.
+	Name string
+	// Version mirrors metadata.version at the time of the run.
+	Version string
+	// Environment is the target environment ("staging", "production", …).
 	Environment string
-	StartedAt   time.Time
-	FinishedAt  *time.Time
-	Status      string
-	User        string
-	Hostname    string
-	Variables   map[string]string
+	// StartedAt is the UTC timestamp when execution began.
+	StartedAt time.Time
+	// FinishedAt is the UTC timestamp when execution ended; nil while running.
+	FinishedAt *time.Time
+	// Status is the final RunStatus label (e.g. "success", "rolled_back").
+	Status string
+	// User is the OS user who started the run.
+	User string
+	// Hostname is the host where the run executed.
+	Hostname string
+	// Variables holds the CLI-provided variables, with secrets redacted before storage.
+	Variables map[string]string
 }
 
 // StepLog represents the outcome of a single block execution within a run.
 type StepLog struct {
-	ID         int64
-	RunID      string
-	StepName   string
-	BlockType  string
-	StartedAt  time.Time
+	// ID is the auto-assigned primary key.
+	ID int64
+	// RunID is the owning run's identifier.
+	RunID string
+	// StepName is the block's name attribute.
+	StepName string
+	// BlockType is one of the ast.BlockType* constants.
+	BlockType string
+	// StartedAt is the UTC timestamp when the block began.
+	StartedAt time.Time
+	// FinishedAt is the UTC timestamp when the block ended.
 	FinishedAt time.Time
-	ExitCode   int
-	Status     string
-	Stdout     string
-	Stderr     string
-	Command    string
+	// ExitCode is the subprocess exit code (-1 on timeout).
+	ExitCode int
+	// Status is the per-block outcome label.
+	Status string
+	// Stdout is the captured (possibly truncated) standard output.
+	Stdout string
+	// Stderr is the captured (possibly truncated) standard error.
+	Stderr string
+	// Command is the executed command, with secrets redacted before storage.
+	Command string
 	// Secrets holds the resolved secret variable values used to redact Command,
 	// Stdout, and Stderr before they are persisted. Not stored in the database.
 	Secrets map[string]string
@@ -93,6 +115,7 @@ type StepLog struct {
 
 // Logger writes audit records to a SQLite database.
 type Logger struct {
+	// db is the underlying SQLite connection pool.
 	db *sql.DB
 	// Warnings holds any security advisory messages produced during Open.
 	// Callers should print these to the user after a successful open.

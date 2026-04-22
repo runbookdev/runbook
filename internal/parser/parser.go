@@ -40,6 +40,47 @@ const (
 	maxLineLengthChars = 10_000
 )
 
+// Fence-line literals used when recognising a block opening.
+const (
+	// blockFence is the triple-backtick sequence that opens or closes a block.
+	blockFence = "```"
+	// frontmatterDelim is the YAML frontmatter delimiter.
+	frontmatterDelim = "---"
+	// metaSeparator is the "\n---\n" sequence that splits block metadata from
+	// the command body inside a fenced block.
+	metaSeparator = "\n---\n"
+)
+
+// Attribute keys recognised on the opening fence line of a block
+// (e.g. ```step name="deploy" rollback="revert").
+const (
+	// attrKeyName is required on every block.
+	attrKeyName = "name"
+	// attrKeyRollback names the rollback handler for a step.
+	attrKeyRollback = "rollback"
+	// attrKeyDependsOn lists parent step names for DAG scheduling.
+	attrKeyDependsOn = "depends_on"
+	// attrKeyDuration is recognised on wait blocks when specified inline.
+	attrKeyDuration = "duration"
+)
+
+// Metadata keys recognised in the "key: value" header of a block body,
+// separated from the command by metaSeparator.
+const (
+	// metaKeyTimeout sets a per-step execution deadline.
+	metaKeyTimeout = "timeout"
+	// metaKeyKillGrace sets the SIGTERM-to-SIGKILL grace period.
+	metaKeyKillGrace = "kill_grace"
+	// metaKeyConfirm gates execution behind an interactive prompt.
+	metaKeyConfirm = "confirm"
+	// metaKeyEnv restricts execution to the listed environments.
+	metaKeyEnv = "env"
+	// metaKeyDuration is the wait block's duration, when set in the body header.
+	metaKeyDuration = "duration"
+	// metaKeyAbortIf short-circuits a wait block when the predicate is true.
+	metaKeyAbortIf = "abort_if"
+)
+
 // attrPattern matches key="value" pairs on the block opening line.
 var attrPattern = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
@@ -123,35 +164,36 @@ func Parse(filePath, content string) (*ast.RunbookAST, error) {
 }
 
 // extractFrontmatter splits YAML frontmatter from the body.
-// Frontmatter must appear at the start of the file, delimited by "---".
+// Frontmatter must appear at the start of the file, delimited by frontmatterDelim.
 func extractFrontmatter(content string) (frontmatter, body string, err error) {
 	trimmed := strings.TrimLeft(content, "\n\r")
-	if !strings.HasPrefix(trimmed, "---") {
+	if !strings.HasPrefix(trimmed, frontmatterDelim) {
 		return "", content, nil
 	}
 
-	// Find the closing ---
-	rest := trimmed[3:]
-	// Skip the newline after opening ---
+	// Find the closing frontmatterDelim.
+	rest := trimmed[len(frontmatterDelim):]
+
+	// Skip the newline after the opening delimiter.
 	if idx := strings.IndexByte(rest, '\n'); idx >= 0 {
 		rest = rest[idx+1:]
 	} else {
 		return "", content, nil
 	}
 
-	// Handle empty frontmatter where closing --- is the very first line.
-	if strings.HasPrefix(rest, "---") {
-		body = rest[3:]
+	// Handle empty frontmatter where the closing delimiter is the very first line.
+	if strings.HasPrefix(rest, frontmatterDelim) {
+		body = rest[len(frontmatterDelim):]
 		return "", body, nil
 	}
 
-	before, after, ok := strings.Cut(rest, "\n---")
+	before, after, ok := strings.Cut(rest, "\n"+frontmatterDelim)
 	if !ok {
 		return "", "", fmt.Errorf("line 1: unclosed frontmatter: missing closing ---")
 	}
 
 	frontmatter = before
-	body = after // skip \n---
+	body = after
 	return frontmatter, body, nil
 }
 
@@ -181,13 +223,13 @@ func extractBlocks(filePath, body string, tree *ast.RunbookAST) error {
 		openLine := i + 1 // 1-based line within body (approximate)
 
 		// Collect block content until a line whose trimmed value is exactly
-		// "```". Lines that contain triple backticks but also have other content
-		// (e.g. "```bash" or "echo '```'") are included in the command body.
+		// the fence. Lines that contain triple backticks but also have other
+		// content (e.g. "```bash" or "echo '```'") are included in the body.
 		i++
 		blockLines := make([]string, 0, 16)
 		closed := false
 		for i < len(lines) {
-			if strings.TrimSpace(lines[i]) == "```" {
+			if strings.TrimSpace(lines[i]) == blockFence {
 				closed = true
 				i++
 				break
@@ -212,28 +254,28 @@ func extractBlocks(filePath, body string, tree *ast.RunbookAST) error {
 // parseBlockOpening checks if a line opens a typed code block.
 // Returns the block type, attributes map, and whether the line matched.
 func parseBlockOpening(line string) (string, map[string]string, bool) {
-	if !strings.HasPrefix(line, "```") {
+	if !strings.HasPrefix(line, blockFence) {
 		return "", nil, false
 	}
 
-	after := line[3:]
+	after := line[len(blockFence):]
 	if after == "" || after == "`" {
 		return "", nil, false
 	}
 
-	// Extract the block type (first word)
+	// Extract the block type (first word).
 	parts := strings.Fields(after)
 	blockType := parts[0]
 
-	// Must be a known block type
+	// Must be a known block type.
 	switch blockType {
-	case "check", "step", "rollback", "wait":
+	case ast.BlockTypeCheck, ast.BlockTypeStep, ast.BlockTypeRollback, ast.BlockTypeWait:
 		// valid
 	default:
 		return "", nil, false
 	}
 
-	// Parse key="value" attributes
+	// Parse key="value" attributes.
 	attrs := make(map[string]string)
 	matches := attrPattern.FindAllStringSubmatch(after, -1)
 	for _, m := range matches {
@@ -245,46 +287,44 @@ func parseBlockOpening(line string) (string, map[string]string, bool) {
 
 // buildNode creates the appropriate AST node from parsed block data.
 func buildNode(filePath, blockType string, attrs map[string]string, content string, line int, tree *ast.RunbookAST) error {
-	name := attrs["name"]
+	name := attrs[attrKeyName]
 	if name == "" {
 		return fmt.Errorf("%s:%d: %s block missing required 'name' attribute", filePath, line, blockType)
 	}
 
-	// Split content into metadata and command at --- separator.
+	// Split content into metadata and command at the metadata separator.
 	command, meta := splitBlockContent(content)
 
 	switch blockType {
-	case "check":
+	case ast.BlockTypeCheck:
 		tree.Checks = append(tree.Checks, ast.CheckNode{
 			Name:    name,
 			Command: command,
 			Line:    line,
 		})
 
-	case "step":
+	case ast.BlockTypeStep:
 		node := ast.StepNode{
 			Name:      name,
 			Command:   command,
-			Rollback:  attrs["rollback"],
-			DependsOn: attrs["depends_on"],
+			Rollback:  attrs[attrKeyRollback],
+			DependsOn: attrs[attrKeyDependsOn],
 			Line:      line,
 		}
-		// Parse inline metadata (timeout, confirm, env)
 		applyStepMeta(&node, meta)
 		return appendStep(filePath, node, tree)
 
-	case "rollback":
+	case ast.BlockTypeRollback:
 		tree.Rollbacks = append(tree.Rollbacks, ast.RollbackNode{
 			Name:    name,
 			Command: command,
 			Line:    line,
 		})
 
-	case "wait":
-		duration := attrs["duration"]
+	case ast.BlockTypeWait:
 		node := ast.WaitNode{
 			Name:     name,
-			Duration: duration,
+			Duration: attrs[attrKeyDuration],
 			Command:  command,
 			Line:     line,
 		}
@@ -296,19 +336,21 @@ func buildNode(filePath, blockType string, attrs map[string]string, content stri
 }
 
 // splitBlockContent separates a block body into metadata lines and the command.
-// If the body contains a "\n---\n" separator, text before it is metadata and
-// text after is the command. Otherwise the entire body is the command.
+// If the body contains a metaSeparator, text before it is metadata and text
+// after is the command. Otherwise the entire body is the command.
 func splitBlockContent(content string) (command, meta string) {
 	// Fast path: find the separator without splitting into lines.
-	before, after, ok := strings.Cut(content, "\n---\n")
+	before, after, ok := strings.Cut(content, metaSeparator)
 	if ok {
 		meta = before
 		command = strings.TrimSpace(after)
 		return command, meta
 	}
-	// Handle trailing "---" at end of content (no trailing newline).
-	if strings.HasSuffix(content, "\n---") {
-		meta = content[:len(content)-4]
+
+	// Handle a trailing frontmatterDelim at end of content (no trailing newline).
+	trailingDelim := "\n" + frontmatterDelim
+	if strings.HasSuffix(content, trailingDelim) {
+		meta = content[:len(content)-len(trailingDelim)]
 		return "", meta
 	}
 	return strings.TrimSpace(content), ""
@@ -322,13 +364,13 @@ func applyStepMeta(node *ast.StepNode, meta string) {
 	for line := range strings.SplitSeq(meta, "\n") {
 		key, value := parseMetaLine(line)
 		switch key {
-		case "timeout":
+		case metaKeyTimeout:
 			node.Timeout = value
-		case "kill_grace":
+		case metaKeyKillGrace:
 			node.KillGrace = value
-		case "confirm":
+		case metaKeyConfirm:
 			node.Confirm = value
-		case "env":
+		case metaKeyEnv:
 			node.Env = parseList(value)
 		}
 	}
@@ -342,11 +384,11 @@ func applyWaitMeta(node *ast.WaitNode, meta string) {
 	for line := range strings.SplitSeq(meta, "\n") {
 		key, value := parseMetaLine(line)
 		switch key {
-		case "duration":
+		case metaKeyDuration:
 			if node.Duration == "" {
 				node.Duration = value
 			}
-		case "abort_if":
+		case metaKeyAbortIf:
 			node.AbortIf = value
 		}
 	}

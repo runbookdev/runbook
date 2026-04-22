@@ -27,55 +27,89 @@ import (
 // execution. A hanging rollback is as dangerous as a hanging step.
 const defaultRollbackTimeout = 5 * time.Minute
 
+// Trigger reasons recorded on a RollbackReport. Exported so that callers
+// inspecting the report can match against well-known constants.
+const (
+	// TriggerStepFailure indicates a step exited non-zero or timed out.
+	TriggerStepFailure = "step_failure"
+	// TriggerUserDeclined indicates the operator answered "no" at a confirmation gate.
+	TriggerUserDeclined = "user_declined"
+	// TriggerUserAbort indicates the operator interrupted the run via SIGINT.
+	TriggerUserAbort = "user_abort"
+)
+
+// rollbackBlockPrefix is prepended to the step name when a rollback runs,
+// so captured output is attributed distinctly from step output.
+const rollbackBlockPrefix = "rollback:"
+
 // RollbackStatus represents the outcome of a single rollback execution.
 type RollbackStatus int
 
 const (
+	// RollbackSuccess indicates the rollback block exited with status 0.
 	RollbackSuccess RollbackStatus = iota
+	// RollbackFailed indicates the rollback block exited with a non-zero status.
 	RollbackFailed
+	// RollbackTimedOut indicates the rollback block exceeded defaultRollbackTimeout.
 	RollbackTimedOut
 )
 
-func (s RollbackStatus) String() string {
-	switch s {
-	case RollbackSuccess:
-		return "success"
-	case RollbackTimedOut:
-		return "timeout"
-	default:
-		return "failed"
-	}
-}
+// Labels returned by RollbackStatus.String.
+const (
+	rollbackLabelSuccess = "success"
+	rollbackLabelFailed  = "failed"
+	rollbackLabelTimeout = "timeout"
+)
 
 // RollbackEntry records the outcome of a single rollback block execution.
 type RollbackEntry struct {
-	Name       string
-	Command    string
-	Status     RollbackStatus
-	Error      string
-	Duration   time.Duration
-	StartedAt  time.Time
+	// Name is the rollback block's name attribute.
+	Name string
+	// Command is the shell script that was executed.
+	Command string
+	// Status is the outcome of the execution.
+	Status RollbackStatus
+	// Error is a short description set when the rollback did not succeed.
+	Error string
+	// Duration is the wall-clock time spent running the rollback.
+	Duration time.Duration
+	// StartedAt is the UTC start timestamp.
+	StartedAt time.Time
+	// FinishedAt is the UTC end timestamp.
 	FinishedAt time.Time
-	ExitCode   int
-	Stdout     string
-	Stderr     string
+	// ExitCode is the subprocess exit code (-1 on timeout).
+	ExitCode int
+	// Stdout is the captured (possibly truncated) standard output.
+	Stdout string
+	// Stderr is the captured (possibly truncated) standard error.
+	Stderr string
 }
 
 // RollbackReport summarizes the full rollback pass.
 type RollbackReport struct {
-	Entries       []RollbackEntry
-	Trigger       string // "step_failure", "user_abort", "user_declined"
-	TriggerStep   string // name of the step that caused rollback (empty for user_abort)
+	// Entries is the per-block outcome, in execution order (LIFO relative to push order).
+	Entries []RollbackEntry
+	// Trigger describes why rollback was initiated; one of the Trigger* constants.
+	Trigger string
+	// TriggerStep is the name of the step that caused rollback
+	// (empty when Trigger == TriggerUserAbort).
+	TriggerStep string
+	// TotalDuration is the wall-clock time spent running all rollbacks.
 	TotalDuration time.Duration
-	Succeeded     int
-	Failed        int
-	TimedOut      int
+	// Succeeded counts rollback blocks that finished cleanly.
+	Succeeded int
+	// Failed counts rollback blocks that failed (including timeouts).
+	Failed int
+	// TimedOut counts rollback blocks killed for exceeding defaultRollbackTimeout.
+	TimedOut int
 }
 
 // RollbackItem is a single entry on the LIFO rollback stack.
 // It is exported so that callers can inspect the Plan without reflection.
 type RollbackItem struct {
-	Name    string
+	// Name is the rollback block's name attribute.
+	Name string
+	// Command is the shell script to execute when the rollback is popped.
 	Command string
 }
 
@@ -86,11 +120,26 @@ type RollbackItem struct {
 // executor may push from parallel step workers). Execute must only be
 // called once, after all workers have drained.
 type RollbackEngine struct {
-	mu       sync.Mutex
-	stack    []RollbackItem
+	// mu guards stack during concurrent Push calls.
+	mu sync.Mutex
+	// stack is the LIFO list of pushed rollback items.
+	stack []RollbackItem
+	// executor runs each rollback command.
 	executor *StepExecutor
 	// Output is where rollback status messages are written (default: os.Stderr).
 	Output io.Writer
+}
+
+// String returns the lowercase label of the rollback status.
+func (s RollbackStatus) String() string {
+	switch s {
+	case RollbackSuccess:
+		return rollbackLabelSuccess
+	case RollbackTimedOut:
+		return rollbackLabelTimeout
+	default:
+		return rollbackLabelFailed
+	}
 }
 
 // NewRollbackEngine creates a RollbackEngine backed by the given StepExecutor.
@@ -180,7 +229,7 @@ func (r *RollbackEngine) Execute(ctx context.Context, trigger string) *RollbackR
 		fmt.Fprintf(out, "[rollback] executing %q (%d of %d)\n", item.Name, len(stack)-i, len(stack))
 
 		blockStart := time.Now()
-		result, err := r.executor.Run(ctx, "rollback:"+item.Name, item.Command, defaultRollbackTimeout, 0)
+		result, err := r.executor.Run(ctx, rollbackBlockPrefix+item.Name, item.Command, defaultRollbackTimeout, 0)
 		blockEnd := time.Now()
 
 		entry := RollbackEntry{

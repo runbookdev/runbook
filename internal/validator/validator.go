@@ -38,30 +38,17 @@ import (
 type Severity int
 
 const (
+	// Error marks a validation failure that must be fixed before running.
 	Error Severity = iota
+	// Warning marks an advisory that does not block execution.
 	Warning
 )
 
-func (s Severity) String() string {
-	if s == Warning {
-		return "warning"
-	}
-	return "error"
-}
-
-// ValidationError represents a single validation issue found in a runbook.
-type ValidationError struct {
-	Severity Severity
-	Message  string
-	Line     int
-}
-
-func (e ValidationError) Error() string {
-	if e.Line > 0 {
-		return fmt.Sprintf("%s: line %d: %s", e.Severity, e.Line, e.Message)
-	}
-	return fmt.Sprintf("%s: %s", e.Severity, e.Message)
-}
+// maxParallelUpperBound is the ceiling enforced on frontmatter max_parallel.
+// Above this the scheduler would spawn an unreasonable number of goroutines
+// and file descriptors (each step opens two pipes). Teams that need more
+// should split the workload into multiple runbooks.
+const maxParallelUpperBound = 256
 
 // varPattern matches {{identifier}} template variables.
 var varPattern = regexp.MustCompile(`\{\{(.*?)\}\}`)
@@ -69,12 +56,42 @@ var varPattern = regexp.MustCompile(`\{\{(.*?)\}\}`)
 // identPattern matches a valid Go-style identifier.
 var identPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// lookPathFunc is the function used to check tool availability. It can be
+// overridden in tests to avoid depending on the host system's PATH.
+var lookPathFunc = exec.LookPath
+
+// ValidationError represents a single validation issue found in a runbook.
+type ValidationError struct {
+	// Severity is Error or Warning.
+	Severity Severity
+	// Message describes the issue in human-readable form.
+	Message string
+	// Line is the 1-based source line, or 0 when the issue is file-scoped.
+	Line int
+}
+
 // Options configures validation behaviour.
 type Options struct {
 	// SecurityStrict promotes all security-advisory warnings (v15–v20) to
 	// errors, causing validate to exit with a non-zero code. Intended for
 	// CI pipelines where any security advisory must be resolved before merge.
 	SecurityStrict bool
+}
+
+// String returns the severity's lowercase label.
+func (s Severity) String() string {
+	if s == Warning {
+		return "warning"
+	}
+	return "error"
+}
+
+// Error implements the error interface for ValidationError.
+func (e ValidationError) Error() string {
+	if e.Line > 0 {
+		return fmt.Sprintf("%s: line %d: %s", e.Severity, e.Line, e.Message)
+	}
+	return fmt.Sprintf("%s: %s", e.Severity, e.Message)
 }
 
 // Validate runs all validation rules against the AST and returns any issues found.
@@ -125,6 +142,7 @@ func v1UniqueNames(ast *rbast.RunbookAST) []ValidationError {
 		blockType string
 		line      int
 	}
+
 	seen := make(map[string]entry)
 	var errs []ValidationError
 
@@ -141,16 +159,19 @@ func v1UniqueNames(ast *rbast.RunbookAST) []ValidationError {
 	}
 
 	for _, c := range ast.Checks {
-		record(c.Name, "check", c.Line)
+		record(c.Name, rbast.BlockTypeCheck, c.Line)
 	}
+
 	for _, s := range ast.Steps {
-		record(s.Name, "step", s.Line)
+		record(s.Name, rbast.BlockTypeStep, s.Line)
 	}
+
 	for _, r := range ast.Rollbacks {
-		record(r.Name, "rollback", r.Line)
+		record(r.Name, rbast.BlockTypeRollback, r.Line)
 	}
+
 	for _, w := range ast.Waits {
-		record(w.Name, "wait", w.Line)
+		record(w.Name, rbast.BlockTypeWait, w.Line)
 	}
 	return errs
 }
@@ -167,6 +188,7 @@ func v2RollbackRefs(ast *rbast.RunbookAST) []ValidationError {
 		if s.Rollback == "" {
 			continue
 		}
+
 		if !rollbackNames[s.Rollback] {
 			msg := fmt.Sprintf("step %q references non-existent rollback %q", s.Name, s.Rollback)
 			if suggestion := suggestName(s.Rollback, rollbackNames); suggestion != "" {
@@ -252,6 +274,7 @@ func v6StepTimeouts(ast *rbast.RunbookAST) []ValidationError {
 		if s.Timeout == "" {
 			continue
 		}
+
 		d, err := time.ParseDuration(s.Timeout)
 		if err != nil {
 			errs = append(errs, ValidationError{
@@ -261,6 +284,7 @@ func v6StepTimeouts(ast *rbast.RunbookAST) []ValidationError {
 			})
 			continue
 		}
+
 		if d < minTimeout || d > maxTimeout {
 			errs = append(errs, ValidationError{
 				Severity: Warning,
@@ -299,12 +323,15 @@ func v7TemplateVars(ast *rbast.RunbookAST) []ValidationError {
 	for _, c := range ast.Checks {
 		checkVars(c.Command, c.Name, c.Line)
 	}
+
 	for _, s := range ast.Steps {
 		checkVars(s.Command, s.Name, s.Line)
 	}
+
 	for _, r := range ast.Rollbacks {
 		checkVars(r.Command, r.Name, r.Line)
 	}
+
 	for _, w := range ast.Waits {
 		checkVars(w.Command, w.Name, w.Line)
 	}
@@ -472,10 +499,6 @@ func splitDeps(raw string) []string {
 	}
 	return out
 }
-
-// lookPathFunc is the function used to check tool availability. It can be
-// overridden in tests to avoid depending on the host system's PATH.
-var lookPathFunc = exec.LookPath
 
 // v10RequiredTools warns if requires.tools lists tools not found in PATH.
 func v10RequiredTools(ast *rbast.RunbookAST) []ValidationError {
@@ -706,12 +729,6 @@ func v14RunbookWritableByOthers(ast *rbast.RunbookAST) []ValidationError {
 		),
 	}}
 }
-
-// maxParallelUpperBound is the ceiling enforced on max_parallel. Above
-// this the scheduler would spawn an unreasonable number of goroutines
-// and file descriptors (each step opens two pipes). Teams that need
-// more should split the workload into multiple runbooks.
-const maxParallelUpperBound = 256
 
 // v22MaxParallel enforces sensible bounds on the frontmatter max_parallel
 // field. Negative values are a configuration error. Values above
