@@ -44,7 +44,7 @@ type Config struct {
 	AuditDir string `yaml:"audit_dir"`
 	// NonInteractive disables every confirmation prompt (--non-interactive).
 	NonInteractive bool `yaml:"non_interactive"`
-	// NoColor disables ANSI colour in CLI output (--no-color).
+	// NoColor disables ANSI color in CLI output (--no-color).
 	NoColor bool `yaml:"no_color"`
 	// Shell overrides DefaultShell (--shell).
 	Shell string `yaml:"shell"`

@@ -106,13 +106,13 @@ const (
 
 // Confirm-prompt input tokens parsed from the operator's response.
 const (
-	confirmInputYes    = "y"
-	confirmInputYesAlt = "yes"
-	confirmInputSkip   = "s"
-	confirmInputSkipAlt = "skip"
-	confirmInputAbort  = "a"
-	confirmInputAbortAlt = "abort"
-	confirmInputReveal = "r"
+	confirmInputYes       = "y"
+	confirmInputYesAlt    = "yes"
+	confirmInputSkip      = "s"
+	confirmInputSkipAlt   = "skip"
+	confirmInputAbort     = "a"
+	confirmInputAbortAlt  = "abort"
+	confirmInputReveal    = "r"
 	confirmInputRevealAlt = "reveal"
 )
 
@@ -226,7 +226,7 @@ type RunOptions struct {
 // runContext holds the shared state for an in-progress execution,
 // allowing the check and step loops to be extracted from Run.
 type runContext struct {
-	// ctx is the parent context honoured by all step executions.
+	// ctx is the parent context honored by all step executions.
 	ctx context.Context
 	// opts is the caller-provided RunOptions.
 	opts RunOptions

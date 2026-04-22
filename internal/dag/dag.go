@@ -46,11 +46,11 @@ const (
 	stateSkipped
 )
 
-// DFS colour constants used by detectCycle.
+// DFS color constants used by detectCycle.
 const (
-	colourWhite = 0 // unvisited
-	colourGray  = 1 // on the current DFS path
-	colourBlack = 2 // fully explored
+	colorWhite = 0 // unvisited
+	colorGray  = 1 // on the current DFS path
+	colorBlack = 2 // fully explored
 )
 
 // Node is a schedulable step in the DAG.
@@ -168,12 +168,12 @@ func detectCycle(g *Graph) []string {
 
 	var visit func(n *Node) []string
 	visit = func(n *Node) []string {
-		color[n.Name] = colourGray
+		color[n.Name] = colorGray
 		stack = append(stack, n.Name)
 
 		for _, dep := range n.Parents {
 			switch color[dep] {
-			case colourGray:
+			case colorGray:
 				// Back-edge — slice the cycle off the stack.
 				for i, name := range stack {
 					if name == dep {
@@ -181,7 +181,7 @@ func detectCycle(g *Graph) []string {
 						return append(out, dep)
 					}
 				}
-			case colourWhite:
+			case colorWhite:
 				if cyc := visit(g.byName[dep]); cyc != nil {
 					return cyc
 				}
@@ -189,12 +189,12 @@ func detectCycle(g *Graph) []string {
 		}
 
 		stack = stack[:len(stack)-1]
-		color[n.Name] = colourBlack
+		color[n.Name] = colorBlack
 		return nil
 	}
 
 	for _, n := range g.nodes {
-		if color[n.Name] == colourWhite {
+		if color[n.Name] == colorWhite {
 			if cyc := visit(n); cyc != nil {
 				return cyc
 			}

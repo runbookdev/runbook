@@ -268,13 +268,15 @@ func TestCheckRunbookDirModes_WorldWritableFlagged(t *testing.T) {
 	dir := t.TempDir()
 	safe := filepath.Join(dir, "safe.runbook")
 	dangerous := filepath.Join(dir, "dangerous.runbook")
-	if err := os.WriteFile(safe, []byte(""), 0o644); err != nil {
+	if err := os.WriteFile(safe, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dangerous, []byte(""), 0o666); err != nil {
+	if err := os.WriteFile(dangerous, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Chmod explicitly in case umask stripped bits.
+	if err := os.Chmod(safe, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(dangerous, 0o666); err != nil {
 		t.Fatal(err)
 	}

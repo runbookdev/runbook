@@ -40,7 +40,7 @@ const (
 	maxLineLengthChars = 10_000
 )
 
-// Fence-line literals used when recognising a block opening.
+// Fence-line literals used when recognizing a block opening.
 const (
 	// blockFence is the triple-backtick sequence that opens or closes a block.
 	blockFence = "```"
@@ -51,7 +51,7 @@ const (
 	metaSeparator = "\n---\n"
 )
 
-// Attribute keys recognised on the opening fence line of a block
+// Attribute keys recognized on the opening fence line of a block
 // (e.g. ```step name="deploy" rollback="revert").
 const (
 	// attrKeyName is required on every block.
@@ -60,11 +60,11 @@ const (
 	attrKeyRollback = "rollback"
 	// attrKeyDependsOn lists parent step names for DAG scheduling.
 	attrKeyDependsOn = "depends_on"
-	// attrKeyDuration is recognised on wait blocks when specified inline.
+	// attrKeyDuration is recognized on wait blocks when specified inline.
 	attrKeyDuration = "duration"
 )
 
-// Metadata keys recognised in the "key: value" header of a block body,
+// Metadata keys recognized in the "key: value" header of a block body,
 // separated from the command by metaSeparator.
 const (
 	// metaKeyTimeout sets a per-step execution deadline.

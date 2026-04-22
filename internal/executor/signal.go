@@ -194,7 +194,7 @@ func (h *SignalHandler) prompt() SignalAction {
 }
 
 // parseAction converts a user response string to a SignalAction.
-// Empty input and anything unrecognised default to ActionRollback (the safe default).
+// Empty input and anything unrecognized default to ActionRollback (the safe default).
 func parseAction(s string) SignalAction {
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch s {
