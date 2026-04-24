@@ -15,6 +15,7 @@ One file, one commit, one review. Documentation and automation can never drift a
 | [Getting started](getting-started.md) | Install, scaffold, validate, and run your first runbook                    |
 | [File format](FORMAT.md)              | Full syntax reference for frontmatter, block types, and template variables |
 | [CLI reference](cli-reference.md)     | All commands, flags, and exit codes                                        |
+| [Bulk execution](bulk.md)             | Run many runbooks, or sweep one runbook across a matrix of bindings        |
 | [Template variables](variables.md)    | `{{variable}}` resolution order and built-in variables                     |
 | [Configuration](configuration.md)     | `~/.runbook/config.yaml` options                                           |
 
@@ -52,6 +53,10 @@ runbook dry-run my-deploy.runbook --env staging
 
 # Run
 runbook run my-deploy.runbook --env staging --var service=api --var version=2.4.0
+
+# Run many at once, or fan one runbook out over a matrix
+runbook bulk --glob 'deploys/*.runbook' --max-runbooks 4
+runbook bulk deploy.runbook --matrix-var env=staging,prod --matrix-var region=us,eu
 
 # Review history
 runbook history

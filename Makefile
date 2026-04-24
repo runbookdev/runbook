@@ -5,7 +5,7 @@ COMMIT    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE      := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS   := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-all release-dry-run test test-pkg lint validate-templates clean
+.PHONY: build build-all release-dry-run test test-pkg fmt vet lint check validate-templates validate-bulk clean
 
 build:
 	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/runbook
@@ -24,11 +24,21 @@ release-dry-run:
 test:
 	CGO_ENABLED=1 go test -race -count=1 ./...
 
+# Usage: make test-pkg P=bulk  (runs ./internal/bulk/...)
 test-pkg:
-	CGO_ENABLED=1 go test -race -count=1 -v ./internal/$(PKG)/...
+	CGO_ENABLED=1 go test -race -count=1 -v ./internal/$(P)/...
+
+fmt:
+	gofmt -s -w .
+
+vet:
+	CGO_ENABLED=1 go vet ./...
 
 lint:
 	CGO_ENABLED=1 golangci-lint run ./...
+
+# Pre-commit sanity: formatting, static analysis, race-enabled tests.
+check: vet lint test
 
 validate-templates: build
 	@echo "Validating .runbook templates..."
@@ -43,5 +53,12 @@ validate-templates: build
 	done; \
 	if [ "$$FAIL" = "1" ]; then echo "Template validation failed"; exit 1; fi
 
+# Smoke-test the bulk command end-to-end against the built binary.
+# Runs every example .runbook in parallel; non-zero exit means a
+# runbook regressed or the bulk wiring broke.
+validate-bulk: build
+	@echo "Running bulk smoke test on example runbooks..."
+	@./bin/runbook bulk --glob 'examples/**/*.runbook' --max-runbooks 2 --keep-going --report text --audit-dir /tmp/runbook-bulk-smoke.db
+
 clean:
-	rm -rf bin/ dist/
+	rm -rf bin/ dist/ /tmp/runbook-bulk-smoke.db

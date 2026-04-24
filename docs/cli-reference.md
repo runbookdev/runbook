@@ -8,16 +8,16 @@ Execute a runbook file.
 runbook run <file> [flags]
 ```
 
-| Flag                 | Description                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| `--env <name>`       | Target environment (e.g. `staging`, `production`)                           |
-| `--var key=value`    | Set a template variable. Repeatable: `--var a=1 --var b=2`                  |
-| `--env-file <path>`  | Load variables from a `.env` file                                           |
-| `--non-interactive`  | Skip all confirmation prompts (auto-yes)                                    |
-| `--dry-run`          | Show the execution plan without running anything                            |
-| `--verbose`          | Show debug-level details: commands, timing, variable values                 |
-| `--audit-dir <path>` | Custom path for the audit database (default: `~/.runbook/audit/runbook.db`) |
-| `--no-color`         | Disable colored terminal output                                             |
+| Flag                 | Description                                                                                                                            |
+|----------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `--env <name>`       | Target environment (e.g. `staging`, `production`)                                                                                      |
+| `--var key=value`    | Set a template variable. Repeatable: `--var a=1 --var b=2`                                                                             |
+| `--env-file <path>`  | Load variables from a `.env` file                                                                                                      |
+| `--non-interactive`  | Skip all confirmation prompts (auto-yes)                                                                                               |
+| `--dry-run`          | Show the execution plan without running anything                                                                                       |
+| `--verbose`          | Show debug-level details: commands, timing, variable values                                                                            |
+| `--audit-dir <path>` | Custom path for the audit database (default: `~/.runbook/audit/runbook.db`)                                                            |
+| `--no-color`         | Disable colored terminal output                                                                                                        |
 | `--max-parallel <n>` | Maximum steps the DAG scheduler runs concurrently (default `0`/`1` = sequential; frontmatter `max_parallel` takes precedence when set) |
 
 **Examples:**
@@ -43,6 +43,56 @@ runbook run deploy.runbook --env staging --dry-run
 # Run independent branches in parallel (up to 4 at once)
 runbook run deploy.runbook --env staging --max-parallel 4
 ```
+
+---
+
+## runbook bulk
+
+Execute many `.runbook` files in one invocation, optionally sweeping the same file across a matrix
+of variable bindings. See [Bulk execution](bulk.md) for a full guide with end-to-end examples.
+
+```
+runbook bulk <file>... [flags]
+```
+
+| Flag                                                                                                                       | Description                                                                                 |
+|----------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| `--glob <pattern>`                                                                                                         | Add every `.runbook` file matching this glob (repeatable)                                   |
+| `-j, --max-runbooks <n>`                                                                                                   | Max runbooks executed concurrently (default `1`; upper bound `256`)                         |
+| `--keep-going`                                                                                                             | Continue dispatching remaining runbooks after a failure (default: fail fast)                |
+| `--matrix <file>`                                                                                                          | YAML matrix file: run each input file once per axis combination                             |
+| `--matrix-var key=v1,v2`                                                                                                   | Inline matrix axis (repeatable). Layers onto `--matrix` file axes                           |
+| `--report <text\|json>`                                                                                                    | Final summary format (default `text`). `json` writes to **stdout**; `text` writes to stderr |
+| `--report-file <path>`                                                                                                     | Also write the JSON report to this file (mode `0600`)                                       |
+| `--env`, `--var`, `--env-file`, `--non-interactive`, `--dry-run`, `--verbose`, `--audit-dir`, `--strict`, `--max-parallel` | Same as `runbook run` — applied to every job                                                |
+
+When `--max-runbooks > 1`, each runbook's output is prefixed with its file name (or matrix label)
+so interleaved streams remain attributable, and `--non-interactive` is auto-forced so parallel
+workers never block on a confirm gate.
+
+**Examples:**
+
+```bash
+# Run two files sequentially, fail-fast
+runbook bulk deploy-api.runbook deploy-web.runbook
+
+# Expand a glob, run up to 4 at once, keep going on failure
+runbook bulk --glob 'deploys/*.runbook' --max-runbooks 4 --keep-going
+
+# Inline matrix: run deploy.runbook 4 times (env × region)
+runbook bulk deploy.runbook \
+  --matrix-var env=staging,prod \
+  --matrix-var region=us,eu
+
+# YAML matrix file with include/exclude rules
+runbook bulk deploy.runbook --matrix matrix.yaml
+
+# JSON report to stdout for tooling
+runbook bulk --glob 'smoke/*.runbook' --report json | jq '.summary'
+```
+
+Exit code is the highest-severity per-run exit code across all jobs (see
+[Exit codes](#exit-codes) below).
 
 ---
 
@@ -187,10 +237,10 @@ declared across `.runbook` frontmatter.
 runbook env [dir] [flags]
 ```
 
-| Flag             | Description                                                              |
-|------------------|--------------------------------------------------------------------------|
-| `--json`         | Output machine-readable JSON                                             |
-| `--check-tools`  | Exit `0` if all required tools are present, `1` if any are missing       |
+| Flag            | Description                                                        |
+|-----------------|--------------------------------------------------------------------|
+| `--json`        | Output machine-readable JSON                                       |
+| `--check-tools` | Exit `0` if all required tools are present, `1` if any are missing |
 
 **Examples:**
 
@@ -242,9 +292,9 @@ Output a shell integration snippet that installs tab completion, the `rb` alias,
 runbook shell-init [flags]
 ```
 
-| Flag            | Description                                                    |
-|-----------------|----------------------------------------------------------------|
-| `--shell <name>`| Target shell: `bash`, `zsh`, or `fish` (default: auto-detect) |
+| Flag             | Description                                                   |
+|------------------|---------------------------------------------------------------|
+| `--shell <name>` | Target shell: `bash`, `zsh`, or `fish` (default: auto-detect) |
 
 **Setup:**
 

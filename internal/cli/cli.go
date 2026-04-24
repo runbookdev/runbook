@@ -60,6 +60,7 @@ checks, sequential steps, automatic rollback, and full audit logging.`,
 
 	root.AddCommand(
 		newRunCmd(),
+		newBulkCmd(),
 		newValidateCmd(),
 		newDryRunCmd(),
 		newInitCmd(),

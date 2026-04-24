@@ -102,6 +102,11 @@ make build && sudo mv bin/runbook /usr/local/bin/
 runbook init --template=deploy my-deploy.runbook
 runbook dry-run my-deploy.runbook --env staging
 runbook run     my-deploy.runbook --env staging --var service=api --var version=2.4.0
+
+# Fan out: run many runbooks in parallel, or sweep one over a matrix
+runbook bulk    --glob 'deploys/*.runbook' --max-runbooks 4
+runbook bulk    my-deploy.runbook --matrix-var env=staging,prod --matrix-var region=us,eu
+
 runbook history
 ```
 
@@ -112,6 +117,7 @@ runbook history
 | [Getting started](docs/getting-started.md)     | Install, scaffold, run your first runbook            |
 | [File format](docs/format.md)                  | Frontmatter, block types, syntax reference           |
 | [CLI reference](docs/cli-reference.md)         | Commands, flags, exit codes                          |
+| [Bulk execution](docs/bulk.md)                 | Run many runbooks or sweep one over a matrix         |
 | [Shell integration](docs/shell-integration.md) | Completion, `rb` alias, prompt indicator             |
 | [Project detection](docs/detect.md)            | Project types, environments, tool availability       |
 | [Template variables](docs/variables.md)        | `{{variable}}` resolution and built-ins              |
