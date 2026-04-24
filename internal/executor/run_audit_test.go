@@ -36,6 +36,7 @@ func openTestAuditLogger(t *testing.T) *audit.Logger {
 }
 
 func TestRun_AuditSuccess(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 
@@ -108,6 +109,7 @@ func TestRun_AuditSuccess(t *testing.T) {
 }
 
 func TestRun_AuditStepFailure(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 
@@ -158,6 +160,7 @@ func TestRun_AuditStepFailure(t *testing.T) {
 }
 
 func TestRun_AuditCheckFailure(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 
@@ -219,6 +222,7 @@ func TestRun_AuditDryRunNoRecord(t *testing.T) {
 }
 
 func TestRun_AuditRedactsSecrets(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 
@@ -257,6 +261,7 @@ func TestRun_AuditRedactsSecrets(t *testing.T) {
 }
 
 func TestRun_AuditNilLoggerNoError(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 
 	// Should work fine with nil AuditLogger.
@@ -274,6 +279,7 @@ func TestRun_AuditNilLoggerNoError(t *testing.T) {
 }
 
 func TestRun_AuditSecretRedaction(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 	const secret = "supersecret123"
@@ -398,6 +404,7 @@ func TestRun_AuditValidationErrorNoRecord(t *testing.T) {
 //   - run.status = "rolled_back"
 //   - correct block_type, status, and non-empty output for each rollback entry
 func TestRun_AuditRollbackCompleteness(t *testing.T) {
+	requireShell(t)
 	al := openTestAuditLogger(t)
 	var stdout, stderr bytes.Buffer
 

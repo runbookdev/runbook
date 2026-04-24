@@ -28,6 +28,7 @@ import (
 // should be noticeably less than the serial sum of sleep durations.
 // Each branch sleeps 0.2s; serial would be ≥0.6s, parallel ~0.2s.
 func TestRun_DAGParallelBranches(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	opts := RunOptions{
 		FilePath:       testdataPath(t, "parallel_dag.runbook"),
@@ -70,6 +71,7 @@ func TestRun_DAGParallelBranches(t *testing.T) {
 // when max_parallel is declared in frontmatter, it overrides the CLI
 // MaxParallel option.
 func TestRun_DAGFrontmatterOverridesCLI(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	opts := RunOptions{
 		FilePath:       testdataPath(t, "parallel_dag.runbook"),
@@ -96,6 +98,7 @@ func TestRun_DAGFrontmatterOverridesCLI(t *testing.T) {
 //   - lets sibling branches complete,
 //   - triggers rollback for already-completed steps with rollback blocks.
 func TestRun_DAGFailureCascadesAndRollsBack(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	result := Run(context.Background(), RunOptions{
 		FilePath:       testdataPath(t, "dag_fail_cascades.runbook"),
@@ -135,6 +138,7 @@ func TestRun_DAGFailureCascadesAndRollsBack(t *testing.T) {
 // Must be race-clean — a missing promptMu would race on the shared
 // stderr buffer and on the scanner reading stdin.
 func TestRun_DAGConfirmSerialized(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	// Two "y\n" answers, one per step.
 	input := strings.NewReader("y\ny\n")

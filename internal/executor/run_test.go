@@ -290,6 +290,7 @@ func TestRun_ConfirmNonInteractive(t *testing.T) {
 }
 
 func TestRun_ConfirmYes(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	input := strings.NewReader("y\n")
 
@@ -311,6 +312,7 @@ func TestRun_ConfirmYes(t *testing.T) {
 }
 
 func TestRun_ConfirmSkip(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	input := strings.NewReader("s\n")
 
@@ -339,6 +341,7 @@ func TestRun_ConfirmSkip(t *testing.T) {
 }
 
 func TestRun_ConfirmAbort(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	input := strings.NewReader("a\n")
 
@@ -357,6 +360,7 @@ func TestRun_ConfirmAbort(t *testing.T) {
 }
 
 func TestRun_ConfirmNo(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	input := strings.NewReader("n\n")
 
