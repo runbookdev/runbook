@@ -25,14 +25,14 @@ import (
 // until a newline arrives so tags never split mid-line when parallel
 // writers interleave.
 type prefixWriter struct {
-	// mu guards buf and serialises flushes to w.
+	// mu guards buf and serializes flushes to w.
 	mu sync.Mutex
 	// label is the string prepended to every emitted line, including
 	// the trailing space separator (e.g. "[deploy.runbook] ").
 	label []byte
 	// buf accumulates bytes until a newline is seen.
 	buf []byte
-	// w is the shared downstream writer (typically serialised by a
+	// w is the shared downstream writer (typically serialized by a
 	// mutex one layer up).
 	w io.Writer
 }

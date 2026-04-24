@@ -159,7 +159,7 @@ func TestRun_FailFastCancelsPending(t *testing.T) {
 		t.Errorf("aggregate exit = %d, want 1 (RunStepFailed)", result.ExitCode())
 	}
 
-	if !strings.Contains(report.String(), "cancelling pending runs") {
+	if !strings.Contains(report.String(), "canceling pending runs") {
 		t.Errorf("expected cancel notice in report stderr, got: %q", report.String())
 	}
 }

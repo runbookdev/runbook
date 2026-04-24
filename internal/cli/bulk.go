@@ -115,7 +115,7 @@ Examples:
 			parsedVars := parseVarFlags(vars)
 
 			// Open a single audit logger, shared across every run.
-			// SQLite WAL + *sql.DB's connection pool serialise writes
+			// SQLite WAL + *sql.DB's connection pool serialize writes
 			// safely under concurrent use, so no extra mutex is needed
 			// at the coordinator layer.
 			var al *audit.Logger
@@ -311,7 +311,7 @@ func parseReportFormat(s string) (bulk.ReportFormat, error) {
 	}
 }
 
-// writeReportFile serialises the bulk result as JSON into path. The
+// writeReportFile serializes the bulk result as JSON into path. The
 // file is always JSON regardless of --report so tooling can consume
 // it unconditionally; --report controls only the on-stderr summary.
 // Created with 0o600 because the report embeds file paths and error

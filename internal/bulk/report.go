@@ -23,7 +23,7 @@ import (
 	"github.com/fatih/color"
 )
 
-// ReportFormat selects the report serialisation.
+// ReportFormat selects the report serialization.
 type ReportFormat string
 
 // Supported report formats.
@@ -120,7 +120,7 @@ func writeJSON(w io.Writer, b *BulkResult) error {
 }
 
 // writeText renders the human-readable summary: one line per run with
-// a status glyph, then an aggregate line. Colours follow the same
+// a status glyph, then an aggregate line. Colors follow the same
 // palette as printRunSummary so the two reports feel consistent when
 // they appear in the same terminal.
 func writeText(w io.Writer, b *BulkResult) error {
@@ -139,11 +139,11 @@ func writeText(w io.Writer, b *BulkResult) error {
 	}
 
 	for _, r := range b.Runs {
-		glyph, colour := statusGlyph(r)
+		glyph, col := statusGlyph(r)
 		dur := dim.Sprintf("(%s)", r.Duration.Round(time.Millisecond))
 		display := displayName(r)
 		if _, err := fmt.Fprintf(w, "  %s %s  %s %s\n",
-			colour.Sprint(glyph), display, string(r.Status), dur); err != nil {
+			col.Sprint(glyph), display, string(r.Status), dur); err != nil {
 			return err
 		}
 
@@ -212,7 +212,7 @@ func labelOrEmpty(r Result) string {
 	return r.Label
 }
 
-// statusGlyph maps a per-run result to its display glyph and colour.
+// statusGlyph maps a per-run result to its display glyph and color.
 func statusGlyph(r Result) (string, *color.Color) {
 	switch {
 	case r.Status == StatusSkipped:

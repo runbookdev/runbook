@@ -112,7 +112,7 @@ func TestPrefixWriter_ConcurrentWritersSameSink(t *testing.T) {
 
 	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
 		if line != "[a] aaa" && line != "[b] bbb" {
-			t.Errorf("line got interleaved or mis-labelled: %q", line)
+			t.Errorf("line got interleaved or mis-labeled: %q", line)
 		}
 	}
 }

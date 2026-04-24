@@ -39,7 +39,7 @@ type Binding map[string]string
 // Matrix is a parameter sweep definition: one or more named axes whose
 // Cartesian product is the default set of runs, optionally augmented
 // by Include rows and narrowed by Exclude rows. The shape mirrors the
-// GitHub Actions matrix schema to minimise surprise for operators who
+// GitHub Actions matrix schema to minimize surprise for operators who
 // already use that pattern in CI.
 type Matrix struct {
 	// Axes maps an axis name (a variable key) to its list of values.

@@ -47,11 +47,19 @@ jobs:
             runner: ubuntu-latest
           - os: macos
             runner: macos-latest
+          - os: windows
+            runner: windows-latest
     env:
       TZ: UTC
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
       GOFLAGS: -mod=vendor
+    # Use bash everywhere so the existing Makefile targets and
+    # shell-style `run:` blocks work identically on Windows — bash
+    # ships with the windows-latest image via Git for Windows.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v6
@@ -81,7 +89,6 @@ jobs:
           args: --timeout 10m --config .golangci.yml
 
       - name: Run tests
-        shell: bash
         run: go test -race -count=1 -timeout 10m -v ./...
 
       - name: Validate templates
@@ -89,8 +96,9 @@ jobs:
 
       - name: Verify binary
         run: |
-          ./bin/runbook version
-          ./bin/runbook --help
+          BIN=./bin/runbook$(go env GOEXE)
+          "$BIN" version
+          "$BIN" --help
 
       - name: Upload coverage
         if: matrix.os == 'linux'

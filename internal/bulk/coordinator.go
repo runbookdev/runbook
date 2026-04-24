@@ -55,7 +55,7 @@ const msgPrefix = "[bulk] "
 // ErrNoJobs is returned by Run when Options.Jobs is empty.
 var ErrNoJobs = errors.New("bulk: no jobs to execute")
 
-// RunStatus is a string label summarising a single runbook's outcome
+// RunStatus is a string label summarizing a single runbook's outcome
 // inside a bulk run. It is a superset of executor.RunStatus labels with
 // one additional value — StatusSkipped — used when fail-fast cancels a
 // file before it was dispatched.
@@ -162,13 +162,13 @@ type BulkResult struct {
 // (validation) > 2 (rolled back) > 1 (step failed) > 0 (success).
 // Skipped runs contribute 0. An empty BulkResult returns 0.
 func (b *BulkResult) ExitCode() int {
-	max := 0
+	highest := 0
 	for _, r := range b.Runs {
-		if r.ExitCode > max {
-			max = r.ExitCode
+		if r.ExitCode > highest {
+			highest = r.ExitCode
 		}
 	}
-	return max
+	return highest
 }
 
 // runFunc is the executor entry point, injected for testability.
@@ -243,7 +243,7 @@ func runWithExecutor(ctx context.Context, opts Options, exec runFunc) (*BulkResu
 		}
 		cancelled = true
 		_, _ = fmt.Fprintf(reportErr,
-			msgPrefix+"cancelling pending runs after failure in %s\n", firstFail)
+			msgPrefix+"canceling pending runs after failure in %s\n", firstFail)
 		cancelRuns()
 		return true
 	}
@@ -304,7 +304,7 @@ dispatch:
 			flushIfPrefixed(runOpts.Stdout)
 			flushIfPrefixed(runOpts.Stderr)
 
-			status, code, msg := summarise(res)
+			status, code, msg := summarize(res)
 			runs[idx] = Result{
 				FilePath:  jobCopy.FilePath,
 				Vars:      jobCopy.Vars,
@@ -415,10 +415,10 @@ func flushIfPrefixed(w io.Writer) {
 	}
 }
 
-// summarise extracts the per-file status fields from an executor result.
+// summarize extracts the per-file status fields from an executor result.
 // A nil result is treated as an internal error so we never lose a slot
 // in the BulkResult.
-func summarise(r *executor.RunResult) (RunStatus, int, string) {
+func summarize(r *executor.RunResult) (RunStatus, int, string) {
 	if r == nil {
 		return RunStatus(executor.RunInternalError.String()), executor.RunInternalError.ExitCode(),
 			"bulk: executor returned nil result"
