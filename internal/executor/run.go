@@ -677,20 +677,26 @@ func (rc *runContext) executeStepsDAG(maxPar int) *RunResult {
 		userDenied bool            // confirm gate answered "no" with rollback decline
 	)
 
-	// drain waits for all in-flight workers to complete after a cancellation.
-	// Workers that raced to success before the cancellation are recorded,
-	// and their rollbacks are pushed so the rollback pass covers them.
+	// drain waits for all in-flight workers to complete after a
+	// cancellation. Every dispatched step in this set had started
+	// executing by the time cancelSteps fired, so its rollback is
+	// pushed regardless of the terminal status reported — a worker
+	// killed mid-exec can return either StatusSuccess (raced to
+	// finish before the kill arrived) or StatusFailed (died via
+	// signal); both cases may have left partial side effects that
+	// the step's rollback block is written to undo. The only case
+	// we drop is a worker that never produced a result (startup
+	// failure before exec), which never ran and therefore never
+	// mutated state.
 	drain := func() {
 		for inFlight > 0 {
 			c := <-done
 			inFlight--
-			if c.err != nil || c.result == nil {
+			if c.result == nil {
 				continue
 			}
 			rc.recordStepResult(c.result, c.step)
-			if c.result.Status == StatusSuccess {
-				rc.pushRollback(c.step)
-			}
+			rc.pushRollback(c.step)
 		}
 	}
 
