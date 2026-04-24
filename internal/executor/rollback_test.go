@@ -24,6 +24,7 @@ import (
 
 func newTestExecutor(t *testing.T) (*StepExecutor, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",

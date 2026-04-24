@@ -22,14 +22,22 @@ import (
 	"testing"
 )
 
-// withHome temporarily points $HOME at a fresh temp directory and seeds the
-// config file with the given content and permission mode. Returns the
-// directory so tests can write additional fixtures next to the config.
+// withHome temporarily points the user's home directory at a fresh
+// temp directory and seeds the config file with the given content
+// and permission mode. Returns the directory so tests can write
+// additional fixtures next to the config.
+//
+// os.UserHomeDir consults different env vars per platform — HOME on
+// Unix, USERPROFILE on Windows — so we set both, unconditionally.
+// Setting the non-native one is harmless; setting only HOME on
+// Windows leaves os.UserHomeDir resolving to the real user profile
+// and the test ends up reading (and sometimes writing) live config.
 func withHome(t *testing.T, configContent string, configPerm os.FileMode) string {
 	t.Helper()
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	dir := filepath.Join(home, ".runbook")
 	if err := os.MkdirAll(dir, 0o700); err != nil {

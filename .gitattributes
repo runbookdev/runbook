@@ -1,0 +1,26 @@
+# Keep line endings consistent across platforms. Git's autocrlf on
+# Windows converts LF to CRLF on checkout for files it treats as
+# text, which breaks parsers that rely on exact `\n` delimiters —
+# notably the .runbook format's `---\n` attribute-block separator
+# and any golden-file fixture compared byte-for-byte in tests.
+
+# Default: treat everything as LF text, let Git normalize on commit.
+* text=auto eol=lf
+
+# Test fixtures and source files must be LF on every platform.
+*.go     text eol=lf
+*.runbook text eol=lf
+*.md     text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+
+# Shell / Makefile artifacts are explicitly LF.
+Makefile text eol=lf
+*.sh     text eol=lf
+
+# Binary assets stay binary.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary

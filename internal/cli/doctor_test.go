@@ -112,6 +112,9 @@ func TestCheckAuditDB_Missing(t *testing.T) {
 }
 
 func TestCheckAuditDB_CorrectPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "runbook.db")
 	if err := os.WriteFile(dbPath, []byte("dummy"), 0o600); err != nil {
@@ -180,6 +183,9 @@ func TestCheckEnvFilePerms_Missing(t *testing.T) {
 }
 
 func TestCheckEnvFilePerms_CorrectPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
 	if err := os.WriteFile(envPath, []byte("KEY=val\n"), 0o600); err != nil {

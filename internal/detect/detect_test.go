@@ -17,6 +17,7 @@ package detect_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/runbookdev/runbook/internal/detect"
@@ -378,8 +379,16 @@ func TestCheckToolsEmpty(t *testing.T) {
 
 func TestCheckToolsMockPath(t *testing.T) {
 	// Create a temp dir with a fake tool binary and add it to PATH.
+	// On Windows, exec.LookPath only accepts files with an extension
+	// listed in PATHEXT (.exe, .bat, …); fabricate a .exe so the
+	// mock is actually discoverable on that platform.
 	bin := tmpDir(t)
-	fakeTool := filepath.Join(bin, "my-fake-tool")
+	toolName := "my-fake-tool"
+	fileName := toolName
+	if runtime.GOOS == "windows" {
+		fileName += ".exe"
+	}
+	fakeTool := filepath.Join(bin, fileName)
 	f, err := os.Create(fakeTool)
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +401,7 @@ func TestCheckToolsMockPath(t *testing.T) {
 	orig := os.Getenv("PATH")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+orig)
 
-	report := detect.CheckTools([]string{"my-fake-tool", "__definitely_absent__"})
+	report := detect.CheckTools([]string{toolName, "__definitely_absent__"})
 
 	found := make(map[string]bool)
 	for _, t2 := range report.Found {

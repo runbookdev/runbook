@@ -36,15 +36,26 @@ func testdataPath(t *testing.T, name string) string {
 
 func runWithDefaults(t *testing.T, fixture string, mutate func(*RunOptions)) *RunResult {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
 	opts := RunOptions{
 		FilePath:       testdataPath(t, fixture),
 		NonInteractive: true,
-		Stdout:         &stdout,
-		Stderr:         &stderr,
 	}
 	if mutate != nil {
 		mutate(&opts)
+	}
+	// Dry-run flows never exec a subprocess, so the POSIX-shell skip
+	// shouldn't apply to them — callers like TestRun_DryRun validate
+	// the planner alone, which is platform-independent.
+	if !opts.DryRun {
+		requireShell(t)
+	}
+	if opts.Stdout == nil {
+		var stdout bytes.Buffer
+		opts.Stdout = &stdout
+	}
+	if opts.Stderr == nil {
+		var stderr bytes.Buffer
+		opts.Stderr = &stderr
 	}
 	return Run(context.Background(), opts)
 }

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 )
 
 func TestRunSuccess(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -59,6 +61,7 @@ func TestRunSuccess(t *testing.T) {
 }
 
 func TestRunFailure(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -80,6 +83,7 @@ func TestRunFailure(t *testing.T) {
 }
 
 func TestRunTimeout(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -104,6 +108,7 @@ func TestRunTimeout(t *testing.T) {
 }
 
 func TestRunStderrCapture(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -125,6 +130,7 @@ func TestRunStderrCapture(t *testing.T) {
 }
 
 func TestRunEnvVars(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -147,6 +153,7 @@ func TestRunEnvVars(t *testing.T) {
 }
 
 func TestRunMultilineCommand(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -169,6 +176,7 @@ func TestRunMultilineCommand(t *testing.T) {
 }
 
 func TestRunWorkDir(t *testing.T) {
+	requireShell(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
@@ -188,6 +196,7 @@ func TestRunWorkDir(t *testing.T) {
 }
 
 func TestRunContextCancellation(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -275,6 +284,7 @@ func TestStepStatusString(t *testing.T) {
 }
 
 func TestRunOutputTruncation(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -302,6 +312,7 @@ func TestRunOutputTruncation(t *testing.T) {
 // TestProcessGroupKillCatchesGrandchild verifies that the process group kill
 // also terminates background child processes spawned by the step.
 func TestProcessGroupKillCatchesGrandchild(t *testing.T) {
+	requireShell(t)
 	var stdout, stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -323,6 +334,7 @@ func TestProcessGroupKillCatchesGrandchild(t *testing.T) {
 // TestSIGKILLFiresAfterGracePeriod verifies that a process ignoring SIGTERM is
 // forcibly killed by SIGKILL once the grace period elapses.
 func TestSIGKILLFiresAfterGracePeriod(t *testing.T) {
+	requireShell(t)
 	var stderr bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -359,6 +371,7 @@ func TestSIGKILLFiresAfterGracePeriod(t *testing.T) {
 // TestTempFilePermissions0600 verifies that the script temp file is created
 // with mode 0600 (readable only by owner).
 func TestTempFilePermissions0600(t *testing.T) {
+	requireShell(t)
 	tmpDir := t.TempDir()
 
 	e := &StepExecutor{
@@ -450,6 +463,7 @@ func TestTempFilePermissions0600(t *testing.T) {
 // TestTempFileCleanedUpAfterTimeout verifies that the temp script is removed
 // even when the step is killed via timeout.
 func TestTempFileCleanedUpAfterTimeout(t *testing.T) {
+	requireShell(t)
 	tmpDir := t.TempDir()
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -475,6 +489,7 @@ func TestTempFileCleanedUpAfterTimeout(t *testing.T) {
 // TestStdinClosedInNonInteractiveMode verifies that when Stdin is nil the
 // subprocess receives EOF immediately (reads from /dev/null).
 func TestStdinClosedInNonInteractiveMode(t *testing.T) {
+	requireShell(t)
 	var stdout bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -501,6 +516,7 @@ func TestStdinClosedInNonInteractiveMode(t *testing.T) {
 // TestStdinForwardedToSubprocess verifies that when Stdin is set its content
 // is available to the subprocess.
 func TestStdinForwardedToSubprocess(t *testing.T) {
+	requireShell(t)
 	var stdout bytes.Buffer
 	e := &StepExecutor{
 		Shell:   "/bin/sh",
@@ -524,6 +540,9 @@ func TestStdinForwardedToSubprocess(t *testing.T) {
 // TestFindOrphans verifies that findOrphans correctly identifies child processes
 // of a given PID and stops reporting them once the children exit.
 func TestFindOrphans(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("findOrphans is a nil stub on windows; no POSIX PPID tree")
+	}
 	// Spawn a long-lived child directly so its PPID is our test process.
 	child := exec.Command("sleep", "60")
 	if err := child.Start(); err != nil {
