@@ -202,6 +202,22 @@ func runWithExecutor(ctx context.Context, opts Options, exec runFunc) (*BulkResu
 	workers := normaliseWorkers(opts.MaxRunbooks, reportErr)
 	parallel := workers > 1
 
+	// In parallel mode the same Stdout/Stderr is written to by every
+	// worker's prefixWriter. Wrap each sink in a syncWriter once so
+	// concurrent Writes to the shared destination can't interleave
+	// at the byte level — bytes.Buffer (tests) and unlocked os.File
+	// (production) both need this. The sequential path preserves
+	// whatever the caller supplied, so phase-1 UX is unchanged.
+	sharedStdout, sharedStderr := opts.Stdout, opts.Stderr
+	if parallel {
+		if sharedStdout != nil {
+			sharedStdout = newSyncWriter(sharedStdout)
+		}
+		if sharedStderr != nil {
+			sharedStderr = newSyncWriter(sharedStderr)
+		}
+	}
+
 	// When running in parallel we force NonInteractive so no worker
 	// blocks reading from stdin while another is streaming output.
 	// The executor already treats this as "auto-confirm" for confirm:
@@ -295,7 +311,7 @@ dispatch:
 			runOpts := template
 			runOpts.FilePath = jobCopy.FilePath
 			runOpts.Vars = mergeVars(template.Vars, jobCopy.Vars)
-			runOpts.Stdout, runOpts.Stderr = writersFor(label, opts.Stdout, opts.Stderr, parallel)
+			runOpts.Stdout, runOpts.Stderr = writersFor(label, sharedStdout, sharedStderr, parallel)
 
 			runStart := time.Now()
 			res := exec(runCtx, runOpts)

@@ -50,6 +50,12 @@ func newPrefixWriter(label string, w io.Writer) *prefixWriter {
 // Write buffers p, splitting on newlines and flushing each complete
 // line with the label prepended. Bytes after the last newline stay
 // buffered until the next Write or Flush.
+//
+// Each emitted line is written to the downstream sink as a single
+// p.w.Write call (label and payload concatenated) so two prefixWriters
+// sharing a sink can't interleave mid-line — without that, writer A's
+// label and writer B's label could both arrive before either's
+// payload, producing `[a] [b] body` on the shared stream.
 func (p *prefixWriter) Write(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -63,11 +69,10 @@ func (p *prefixWriter) Write(b []byte) (int, error) {
 		}
 
 		line := p.buf[:idx+1]
-		if _, err := p.w.Write(p.label); err != nil {
-			return n, err
-		}
-
-		if _, err := p.w.Write(line); err != nil {
+		out := make([]byte, 0, len(p.label)+len(line))
+		out = append(out, p.label...)
+		out = append(out, line...)
+		if _, err := p.w.Write(out); err != nil {
 			return n, err
 		}
 		p.buf = p.buf[idx+1:]
@@ -75,10 +80,42 @@ func (p *prefixWriter) Write(b []byte) (int, error) {
 	return n, nil
 }
 
+// syncWriter serializes writes to an underlying writer. The bulk
+// coordinator wraps the shared Stdout/Stderr in one of these before
+// handing them to per-job prefixWriters, so two parallel workers
+// writing into e.g. a bytes.Buffer (common in tests) or an unlocked
+// file handle can't corrupt the sink's internal state — bytes.Buffer
+// is explicitly not safe for concurrent goroutine writes, and even
+// os.File.Write is only as atomic as the kernel's underlying write(2).
+type syncWriter struct {
+	// mu serializes Write calls to w.
+	mu sync.Mutex
+	// w is the downstream sink (os.Stdout, a bytes.Buffer in tests,
+	// or any io.Writer the caller supplied).
+	w io.Writer
+}
+
+// newSyncWriter returns w wrapped with a mutex. The returned writer
+// is safe for concurrent Write calls from any number of goroutines.
+func newSyncWriter(w io.Writer) *syncWriter {
+	return &syncWriter{w: w}
+}
+
+// Write serializes each Write call against the mutex. Payloads are
+// forwarded as a single call to the underlying sink — callers that
+// need label+payload atomicity (e.g. prefixWriter) must already be
+// emitting the whole tagged line in one Write.
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 // Flush emits any buffered partial line with the label prepended and
 // a trailing newline appended. Callers must invoke Flush before the
 // writer is discarded so no output is lost on runs that don't end in
-// a newline.
+// a newline. Uses a single downstream Write call for the same
+// interleaving reason documented on Write.
 func (p *prefixWriter) Flush() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -87,18 +124,20 @@ func (p *prefixWriter) Flush() error {
 		return nil
 	}
 
-	if _, err := p.w.Write(p.label); err != nil {
-		return err
+	needsNewline := p.buf[len(p.buf)-1] != '\n'
+	size := len(p.label) + len(p.buf)
+	if needsNewline {
+		size++
+	}
+	out := make([]byte, 0, size)
+	out = append(out, p.label...)
+	out = append(out, p.buf...)
+	if needsNewline {
+		out = append(out, '\n')
 	}
 
-	if _, err := p.w.Write(p.buf); err != nil {
+	if _, err := p.w.Write(out); err != nil {
 		return err
-	}
-
-	if p.buf[len(p.buf)-1] != '\n' {
-		if _, err := p.w.Write([]byte{'\n'}); err != nil {
-			return err
-		}
 	}
 	p.buf = p.buf[:0]
 	return nil
